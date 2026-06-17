@@ -1,9 +1,11 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import { schemaStatements } from './schema.js';
 
-const DEFAULT_DATABASE_PATH = resolve(process.cwd(), 'data', 'jarvis.sqlite');
+const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const DEFAULT_DATABASE_PATH = resolve(SERVER_ROOT, 'data', 'jarvis.sqlite');
 
 export function getDatabasePath() {
   return resolve(process.env.JARVIS_DB_PATH ?? DEFAULT_DATABASE_PATH);
