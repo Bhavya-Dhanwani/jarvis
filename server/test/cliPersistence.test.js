@@ -25,6 +25,7 @@ test('CLI creates a chat, persists messages, and resumes the active chat', async
       input: Readable.from(['hello jarvis\n', '/exit\n']),
       outputStream: firstOutput.stream,
       output: firstOutput.writeLine,
+      assistantService: createFakeAssistant('hello human'),
     });
 
     const chat = chatRepository.findLatest();
@@ -33,10 +34,13 @@ test('CLI creates a chat, persists messages, and resumes the active chat', async
     assert.deepEqual(chat.metadata, { source: 'cli' });
 
     const firstMessages = messageRepository.listByChatId(chat.id);
-    assert.equal(firstMessages.length, 1);
+    assert.equal(firstMessages.length, 2);
     assert.equal(firstMessages[0].role, 'user');
     assert.equal(firstMessages[0].content, 'hello jarvis');
     assert.deepEqual(firstMessages[0].metadata, { source: 'cli' });
+    assert.equal(firstMessages[1].role, 'assistant');
+    assert.equal(firstMessages[1].content, 'hello human');
+    assert.deepEqual(firstMessages[1].metadata, { source: 'ollama' });
 
     const activeSession = sessionRepository.getActiveSession();
     assert.equal(activeSession.chatId, chat.id);
@@ -48,13 +52,15 @@ test('CLI creates a chat, persists messages, and resumes the active chat', async
       input: Readable.from(['continue\n', '/exit\n']),
       outputStream: secondOutput.stream,
       output: secondOutput.writeLine,
+      assistantService: createFakeAssistant('still here'),
     });
 
     const resumedMessages = messageRepository.listByChatId(chat.id);
-    assert.equal(resumedMessages.length, 2);
-    assert.equal(resumedMessages[1].content, 'continue');
+    assert.equal(resumedMessages.length, 4);
+    assert.equal(resumedMessages[2].content, 'continue');
+    assert.equal(resumedMessages[3].content, 'still here');
     assert.equal(sessionRepository.getActiveSession().chatId, chat.id);
-    assert.match(secondOutput.text(), /Loaded 1 messages\./);
+    assert.match(secondOutput.text(), /Loaded 2 messages\./);
   } finally {
     database.close();
   }
@@ -77,6 +83,14 @@ function createOutputCapture() {
     },
     text() {
       return chunks.join('');
+    },
+  };
+}
+
+function createFakeAssistant(reply) {
+  return {
+    async generateReply() {
+      return reply;
     },
   };
 }

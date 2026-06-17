@@ -6,6 +6,8 @@ import { NoChatSessionError } from '../core/errors.js';
 import { formatSystemReport, getSystemReport } from '../core/systemCheck.js';
 import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
+import { createModelConfig } from '../services/modelConfigService.js';
+import { OllamaService } from '../services/ollamaService.js';
 import { printHelp, printVersion } from './commands.js';
 import { parseCommand } from './parser.js';
 
@@ -34,7 +36,7 @@ export async function runCli(args, context = {}) {
 
   if (command.command === 'new') {
     const database = context.database ?? await createRuntimeDatabase();
-    const chatService = createChatService(database);
+    const chatService = createChatService(database, context);
     const chatLoopService = new ChatLoopService({
       chatService,
       input: context.input,
@@ -53,7 +55,7 @@ export async function runCli(args, context = {}) {
 
   if (command.command === 'resume') {
     const database = context.database ?? await createRuntimeDatabase();
-    const chatService = createChatService(database);
+    const chatService = createChatService(database, context);
     const chatLoopService = new ChatLoopService({
       chatService,
       input: context.input,
@@ -83,11 +85,14 @@ export async function runCli(args, context = {}) {
   throw new Error(`Unsupported command: ${command.command}`);
 }
 
-function createChatService(database) {
+function createChatService(database, context = {}) {
+  const modelConfig = createModelConfig();
+
   return new ChatService({
     chatRepository: new ChatRepository(database),
     messageRepository: new MessageRepository(database),
     sessionRepository: new SessionRepository(database),
+    assistantService: context.assistantService ?? new OllamaService(modelConfig),
   });
 }
 

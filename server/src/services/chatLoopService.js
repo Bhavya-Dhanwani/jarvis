@@ -29,7 +29,7 @@ export class ChatLoopService {
         for await (const line of readline) {
           this.output.write('> ');
 
-          if (this.#handleLine(chat.id, line)) {
+          if (await this.#handleLine(chat.id, line)) {
             return { status: 'closed', chatId: chat.id };
           }
         }
@@ -40,7 +40,7 @@ export class ChatLoopService {
 
       while (true) {
         const line = await readline.question('> ');
-        if (this.#handleLine(chat.id, line)) {
+        if (await this.#handleLine(chat.id, line)) {
           return { status: 'closed', chatId: chat.id };
         }
       }
@@ -56,7 +56,7 @@ export class ChatLoopService {
     }
   }
 
-  #handleLine(chatId, line) {
+  async #handleLine(chatId, line) {
     const message = line.trim();
 
     if (EXIT_COMMANDS.has(message)) {
@@ -68,8 +68,19 @@ export class ChatLoopService {
       return false;
     }
 
-    this.chatService.saveUserMessage(chatId, message);
-    this.output.write('Saved.\n');
+    try {
+      const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message);
+
+      if (assistantMessage) {
+        this.output.write(`Jarvis: ${assistantMessage.content}\n`);
+        return false;
+      }
+
+      this.output.write('Saved.\n');
+    } catch (error) {
+      this.output.write(`Jarvis unavailable: ${error.message}\n`);
+    }
+
     return false;
   }
 }
