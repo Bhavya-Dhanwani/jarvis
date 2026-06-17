@@ -9,7 +9,7 @@ export class ChatLoopService {
     this.output = output;
   }
 
-  async run(chat) {
+  async run(chat, options = {}) {
     const isTerminal = this.input.isTTY === true;
     const readline = createInterface({
       input: this.input,
@@ -17,7 +17,12 @@ export class ChatLoopService {
       terminal: isTerminal,
     });
 
-    this.output.write(`Chat ${chat.id}\n`);
+    if (options.mode === 'resume') {
+      this.output.write(`Resumed chat ${chat.id}\n`);
+      this.output.write(`Loaded ${options.messageCount ?? 0} messages.\n`);
+    } else {
+      this.output.write(`Chat ${chat.id}\n`);
+    }
 
     try {
       if (!isTerminal) {

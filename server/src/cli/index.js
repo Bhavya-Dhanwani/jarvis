@@ -2,6 +2,7 @@ import packageInfo from '../../package.json' with { type: 'json' };
 import { ChatRepository } from '../repositories/chatRepository.js';
 import { MessageRepository } from '../repositories/messageRepository.js';
 import { SessionRepository } from '../repositories/sessionRepository.js';
+import { NoChatSessionError } from '../core/errors.js';
 import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
 import { printHelp, printVersion } from './commands.js';
@@ -45,8 +46,32 @@ export async function runCli(args, context = {}) {
   }
 
   if (command.command === 'resume') {
-    output('Jarvis resume is not initialized yet.');
-    return { status: 'pending', command: 'resume' };
+    const database = context.database ?? await createRuntimeDatabase();
+    const chatService = createChatService(database);
+    const chatLoopService = new ChatLoopService({
+      chatService,
+      input: context.input,
+      output: context.outputStream,
+    });
+
+    try {
+      const { chat, messages } = chatService.resumeLatestChat();
+      return await chatLoopService.run(chat, {
+        mode: 'resume',
+        messageCount: messages.length,
+      });
+    } catch (error) {
+      if (error instanceof NoChatSessionError) {
+        output(error.message);
+        return { status: 'empty', command: 'resume' };
+      }
+
+      throw error;
+    } finally {
+      if (!context.database) {
+        database.close();
+      }
+    }
   }
 
   throw new Error(`Unsupported command: ${command.command}`);
