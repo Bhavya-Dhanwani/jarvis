@@ -1,4 +1,4 @@
-const COMMANDS = new Set(['new', 'resume', 'help', 'version']);
+const COMMANDS = new Set(['new', 'resume', 'doctor', 'help', 'version']);
 
 export function parseCommand(args) {
   const [commandArg, ...rest] = args;

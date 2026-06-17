@@ -4,6 +4,7 @@ export function printHelp(output = console.log) {
 Usage:
   jarvis          Start a new chat session
   jarvis resume   Resume the most recent chat session
+  jarvis doctor   Check local system and Ollama readiness
 
 Options:
   -h, --help      Show help

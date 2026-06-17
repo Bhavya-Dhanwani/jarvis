@@ -3,6 +3,7 @@ import { ChatRepository } from '../repositories/chatRepository.js';
 import { MessageRepository } from '../repositories/messageRepository.js';
 import { SessionRepository } from '../repositories/sessionRepository.js';
 import { NoChatSessionError } from '../core/errors.js';
+import { formatSystemReport, getSystemReport } from '../core/systemCheck.js';
 import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
 import { printHelp, printVersion } from './commands.js';
@@ -20,6 +21,11 @@ export async function runCli(args, context = {}) {
   if (command.command === 'version') {
     printVersion(packageInfo, output);
     return { status: 'ok' };
+  }
+
+  if (command.command === 'doctor') {
+    output(formatSystemReport(await getSystemReport()));
+    return { status: 'ok', command: 'doctor' };
   }
 
   if (command.command === 'unknown') {
