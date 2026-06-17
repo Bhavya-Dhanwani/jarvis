@@ -1,33 +1,36 @@
 import { createInterface } from 'node:readline/promises';
+import { createModelConfig } from './modelConfigService.js';
+import { createTerminalUi } from '../cli/terminalUi.js';
 
 const EXIT_COMMANDS = new Set(['/exit', '/quit']);
 
 export class ChatLoopService {
-  constructor({ chatService, input = process.stdin, output = process.stdout }) {
+  constructor({ chatService, input = process.stdin, output = process.stdout, ui = null }) {
     this.chatService = chatService;
     this.input = input;
     this.output = output;
+    this.ui = ui ?? createTerminalUi({ output });
   }
 
   async run(chat, options = {}) {
     const isTerminal = this.input.isTTY === true;
+    await this.ui.renderHeader({
+      mode: options.mode ?? 'new',
+      chat,
+      messageCount: options.messageCount ?? 0,
+      modelConfig: options.modelConfig ?? createModelConfig(),
+    });
+
     const readline = createInterface({
       input: this.input,
       output: this.output,
       terminal: isTerminal,
     });
 
-    if (options.mode === 'resume') {
-      this.output.write(`Resumed chat ${chat.id}\n`);
-      this.output.write(`Loaded ${options.messageCount ?? 0} messages.\n`);
-    } else {
-      this.output.write(`Chat ${chat.id}\n`);
-    }
-
     try {
       if (!isTerminal) {
         for await (const line of readline) {
-          this.output.write('> ');
+          this.output.write(this.ui.prompt());
 
           if (await this.#handleLine(chat.id, line)) {
             return { status: 'closed', chatId: chat.id };
@@ -39,7 +42,7 @@ export class ChatLoopService {
       }
 
       while (true) {
-        const line = await readline.question('> ');
+        const line = await readline.question(this.ui.prompt());
         if (await this.#handleLine(chat.id, line)) {
           return { status: 'closed', chatId: chat.id };
         }
@@ -60,7 +63,7 @@ export class ChatLoopService {
     const message = line.trim();
 
     if (EXIT_COMMANDS.has(message)) {
-      this.output.write('Session saved.\n');
+      this.ui.sessionSaved();
       return true;
     }
 
@@ -72,13 +75,13 @@ export class ChatLoopService {
       const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message);
 
       if (assistantMessage) {
-        this.output.write(`Jarvis: ${assistantMessage.content}\n`);
+        this.ui.assistant(assistantMessage.content);
         return false;
       }
 
-      this.output.write('Saved.\n');
+      this.ui.saved();
     } catch (error) {
-      this.output.write(`Jarvis unavailable: ${error.message}\n`);
+      this.ui.unavailable(error.message);
     }
 
     return false;

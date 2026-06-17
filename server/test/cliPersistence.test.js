@@ -60,7 +60,7 @@ test('CLI creates a chat, persists messages, and resumes the active chat', async
     assert.equal(resumedMessages[2].content, 'continue');
     assert.equal(resumedMessages[3].content, 'still here');
     assert.equal(sessionRepository.getActiveSession().chatId, chat.id);
-    assert.match(secondOutput.text(), /Loaded 2 messages\./);
+    assert.match(secondOutput.text(), /Messages loaded: 2/);
   } finally {
     database.close();
   }
