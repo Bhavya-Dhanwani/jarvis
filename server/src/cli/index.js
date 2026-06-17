@@ -8,6 +8,7 @@ import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
 import { createModelConfig } from '../services/modelConfigService.js';
 import { OllamaService } from '../services/ollamaService.js';
+import { formatSetupReport, getSetupReport } from '../services/setupService.js';
 import { printHelp, printVersion } from './commands.js';
 import { parseCommand } from './parser.js';
 
@@ -28,6 +29,11 @@ export async function runCli(args, context = {}) {
   if (command.command === 'doctor') {
     output(formatSystemReport(await getSystemReport()));
     return { status: 'ok', command: 'doctor' };
+  }
+
+  if (command.command === 'setup') {
+    output(formatSetupReport(await getSetupReport()));
+    return { status: 'ok', command: 'setup' };
   }
 
   if (command.command === 'unknown') {
