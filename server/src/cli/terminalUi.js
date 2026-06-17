@@ -17,7 +17,7 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       output.write(`${color.blue('*')} Messages loaded: ${messageCount}\n`);
       output.write(`${color.blue('*')} Ollama model: ${modelConfig?.model ?? 'not configured'}\n`);
       output.write(`${color.blue('*')} Commands: /exit, /quit\n\n`);
-      output.write(`${color.magenta(cwd)} ${color.dim(`[${branch}]`)}\n`);
+      output.write(`${color.cyan(cwd)} ${color.dim(`[${branch}]`)}\n`);
       output.write(`${color.dim('-'.repeat(72))}\n`);
     },
 
@@ -44,6 +44,8 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
 }
 
 const BANNER = String.raw`
+     J A R V I S
+
      __  ___    ____ _    __ ____ _____
     / / /   |  / __ \ |  / //  _// ___/
 __ / / / /| | / /_/ / | / / / /  \__ \
@@ -58,7 +60,6 @@ function createColorPalette(enabled) {
       cyan: identity,
       dim: identity,
       green: identity,
-      magenta: identity,
       yellow: identity,
     };
   }
@@ -68,7 +69,6 @@ function createColorPalette(enabled) {
     cyan: wrap(36),
     dim: wrap(2),
     green: wrap(32),
-    magenta: wrap(35),
     yellow: wrap(33),
   };
 }
