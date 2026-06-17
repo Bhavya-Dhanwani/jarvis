@@ -1,13 +1,16 @@
 {
-  "name": "JARVIS",
+  "name": "jarvis",
   "version": "1.0.0",
   "description": "This is JARVIS a multi agent Ai assistant ready to help you out 24/7",
   "main": "server.js",
+  "bin": {
+    "jarvis": "./bin/jarvis.js"
+  },
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --test",
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "node --watch server.js"
   },
   "keywords": [],
   "author": "Bhavya",
