@@ -1,62 +1,78 @@
-// Store the JARVIS ASCII logo as a raw string so backslashes stay intact.
-const LOGO = String.raw`
-       __     ______     ______     __   __   __     ______
-      /\ \   /\  __ \   /\  == \   /\ \ / /  /\ \   /\  ___\
-     _\_\ \  \ \  __ \  \ \  __<   \ \ \'/   \ \ \  \ \___  \
-    /\_____\  \ \_\ \_\  \ \_\ \_\  \ \__|    \ \_\  \/\_____\
-    \/_____/   \/_/\/_/   \/_/ /_/   \/_/      \/_/   \/_____/
-`;
+import figlet from 'figlet';
+import { cyberGradient, muted, panel, theme } from './theme.js';
 
-// Return the ASCII logo for callers that want to print it themselves.
-export function getJarvisLogo() {
-  // Return the raw logo text.
-  return LOGO;
+export function getJarvisLogo(text = 'JARVIS') {
+  return figlet.textSync(text, {
+    font: 'ANSI Shadow',
+    horizontalLayout: 'default',
+    verticalLayout: 'default',
+  });
 }
 
-// Play the animated setup boot sequence.
 export async function playBootSequence({ output = process.stdout, delay = wait } = {}) {
-  // Add spacing before the logo.
   output.write('\n');
-  // Print each logo line with a small delay.
-  for (const line of LOGO.split('\n')) {
-    // Write the current logo line.
-    output.write(`${line}\n`);
-    // Pause briefly to create an animation effect.
-    await delay(25);
+  output.write(`${cyberGradient(getJarvisLogo())}\n`);
+  output.write(panel(`${theme.title('JARVIS SETUP WIZARD')}\n${muted('Local AI Core Installer')}`, {
+    borderColor: 'cyan',
+    padding: 1,
+  }));
+  output.write('\n\n');
+  await typewriter('Initializing local intelligence core...', { output, speed: 12, delay });
+  await typewriter('Synchronizing local runtime protocols...', { output, speed: 12, delay });
+}
+
+export async function playChatSequence({ output = process.stdout, mode = 'new', delay = wait } = {}) {
+  output.write('\n');
+  output.write(`${cyberGradient(getJarvisLogo('JARVIS'))}\n`);
+  output.write(panel(`${theme.title(mode === 'resume' ? 'JARVIS SESSION RESUME' : 'JARVIS COMMAND INTERFACE')}\n${muted('Local AI Runtime Console')}`, {
+    borderColor: mode === 'resume' ? 'magenta' : 'cyan',
+    padding: 1,
+  }));
+  output.write('\n\n');
+  await typewriter(mode === 'resume' ? 'Restoring active memory thread...' : 'Booting conversational interface...', {
+    output,
+    speed: 10,
+    delay,
+  });
+}
+
+export async function playDoctorSequence({ output = process.stdout, delay = wait } = {}) {
+  output.write('\n');
+  output.write(`${cyberGradient(getJarvisLogo('DOCTOR'))}\n`);
+  output.write(panel(`${theme.title('JARVIS DIAGNOSTICS')}\n${muted('System and Runtime Health Scan')}`, {
+    borderColor: 'cyan',
+    padding: 1,
+  }));
+  output.write('\n\n');
+  await typewriter('Scanning host system telemetry...', { output, speed: 10, delay });
+}
+
+export async function playOnlineSequence({ output = process.stdout, delay = wait } = {}) {
+  output.write('\n');
+  output.write(`${cyberGradient(getJarvisLogo('ONLINE'))}\n`);
+  await typewriter('JARVIS is online. Local AI core ready.', { output, speed: 10, delay });
+}
+
+export async function typewriter(message, { output = process.stdout, speed = 14, delay = wait } = {}) {
+  if (!output.isTTY) {
+    output.write(`${message}\n`);
+    return;
   }
 
-  // Add spacing after the logo.
-  output.write('\n');
-  // Print the first boot message with a typewriter effect.
-  await typewriter('Initializing local intelligence core...', { output, speed: 18, delay });
-  // Print the scan message with a typewriter effect.
-  await typewriter('Scanning host system...', { output, speed: 18, delay });
-}
-
-// Print text one character at a time.
-export async function typewriter(message, { output = process.stdout, speed = 14, delay = wait } = {}) {
-  // Iterate over each character in the message.
   for (const char of message) {
-    // Write one character.
-    output.write(char);
-    // Pause between characters.
+    output.write(theme.primary(char));
     await delay(speed);
   }
-  // Finish the typewriter line.
   output.write('\n');
 }
 
-// Print a simple JARVIS-branded banner.
 export function banner(message, { output = process.stdout } = {}) {
-  // Write the banner message with spacing.
-  output.write(`\n[ JARVIS ] ${message}\n`);
+  output.write(panel(theme.success(message), { borderColor: 'green' }));
+  output.write('\n');
 }
 
-// Wait for a number of milliseconds.
 function wait(ms) {
-  // Resolve after the timeout completes.
   return new Promise((resolve) => {
-    // Schedule the resolver.
     setTimeout(resolve, ms);
   });
 }

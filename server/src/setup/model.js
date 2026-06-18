@@ -2,7 +2,7 @@
 import { getOllamaModels, hasModel, pullModel } from './ollama.js';
 
 // Define the default model requested for first-run setup.
-export const DEFAULT_MODEL = 'gemma3:4b';
+export const DEFAULT_MODEL = 'gemma4:e4b';
 
 // Ensure the selected model is installed before setup completes.
 export async function ensureModel(model, prompts, { output = process.stdout } = {}) {

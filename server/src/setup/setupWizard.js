@@ -1,342 +1,454 @@
-// Import existsSync to check whether config files already exist.
 import { existsSync } from 'node:fs';
-// Import promise-based file helpers for creating folders and writing config.
 import { mkdir, writeFile } from 'node:fs/promises';
-// Import path helpers for building config and data paths.
 import { dirname, join } from 'node:path';
-// Import homedir for the default Unix-style data location.
 import { homedir } from 'node:os';
-// Import system detection for OS and architecture checks.
 import { detectSystem } from './detectSystem.js';
-// Import Ollama runtime and server helpers.
 import {
-  // Use the local Ollama API host constant.
   OLLAMA_HOST,
-  // Check whether the Ollama CLI is installed.
+  getOllamaModels,
   getOllamaVersion,
-  // Check whether the Ollama HTTP server is running.
+  hasModel,
   isOllamaServerRunning,
-  // Start the Ollama server if the user confirms.
+  pullModel,
   startOllamaServer,
-  // Wait for the Ollama server to become ready.
   waitForOllamaServer,
 } from './ollama.js';
-// Import default model and model installation helper.
-import { DEFAULT_MODEL, ensureModel } from './model.js';
-// Import Windows-specific drive and installer helpers.
-import { downloadWindowsInstaller, runWindowsInstaller, validateWindowsDrive } from './windowsSetup.js';
-// Import macOS/Linux installer helper.
+import { DEFAULT_MODEL } from './model.js';
+import {
+  downloadWindowsInstaller,
+  ensureWindowsPathContains,
+  findWindowsOllamaExecutable,
+  removeInstallerFile,
+  runWindowsInstaller,
+  validateWindowsDrive,
+} from './windowsSetup.js';
 import { runUnixOllamaInstall } from './unixSetup.js';
-// Import JARVIS-themed text UI helpers.
-import { playBootSequence, typewriter, banner } from '../ui/ascii.js';
-// Import prompt session wrapper for confirmations and questions.
+import { banner, playBootSequence, playOnlineSequence, typewriter } from '../ui/ascii.js';
 import { PromptSession } from '../ui/prompts.js';
-// Import loading animations and spinner helper.
 import { loading, withSpinner } from '../ui/spinner.js';
+import { withProgress } from '../ui/progress.js';
+import {
+  card,
+  divider,
+  errorBox,
+  section,
+  statusLine,
+  successBox,
+  theme,
+  warningBox,
+} from '../ui/theme.js';
 
-// Run the complete first-run setup wizard.
 export async function runSetupWizard({
-  // Use stdin by default for interactive answers.
   input = process.stdin,
-  // Use stdout by default for wizard output.
   output = process.stdout,
-  // Use process.env by default for model overrides.
   env = process.env,
 } = {}) {
-  // Show the animated JARVIS boot sequence before prompts begin.
   await playBootSequence({ output });
-  // Create the prompt session after animation so piped input is not consumed early.
   const prompts = new PromptSession({ input, output });
 
-  // Ensure readline is closed even if setup fails.
   try {
-    // Ask for explicit permission to continue setup.
-    const shouldContinue = await prompts.confirm('Continue setup?', { defaultValue: true });
-    // Stop immediately if the user does not want to proceed.
+    const shouldContinue = await prompts.confirm('Continue JARVIS first-run setup?', {
+      defaultValue: true,
+      hint: 'The wizard will scan your system and ask before every install, server start, model pull, or overwrite.',
+    });
+
     if (!shouldContinue) {
-      // Tell the user the wizard stopped intentionally.
-      output.write('Setup aborted by user.\n');
-      // Return an aborted result for tests or callers.
+      output.write(warningBox('Setup aborted by user. No changes were made.'));
       return { status: 'aborted' };
     }
 
-    // Detect OS, release, architecture, and support flags.
-    const system = detectSystem();
-    // Show a small loading animation for system scanning.
-    await loading('Scanning host system...', { output });
-    // Print the detected OS.
-    output.write(`OS: ${system.os} ${system.release}\n`);
-    // Print the detected architecture.
-    output.write(`Architecture: ${system.arch}\n`);
+    output.write(section('SYSTEM SCAN'));
+    const system = await withSpinner('Scanning host system', async () => detectSystem(), { output });
+    output.write(statusLine('success', 'OS detected', `${system.os} ${system.release}`));
+    output.write(statusLine('success', 'Architecture', system.arch));
 
-    // Block unsupported operating systems.
     if (!system.supportedOs) {
-      // Explain which OS values are supported.
       throw new Error(`Unsupported OS: ${system.platform}. Supported: Windows, macOS, Linux.`);
     }
 
-    // Block unsupported CPU architectures.
     if (!system.supportedArch) {
-      // Explain which architecture values are supported.
       throw new Error(`Unsupported architecture: ${system.arch}. Supported: x64, arm64.`);
     }
 
-    // Choose the data root based on platform.
+    const ollamaVersion = await ensureOllamaInstalled(system, prompts, { output });
     const dataRoot = system.isWindows
-      // Ask Windows users which drive to use.
       ? await chooseWindowsDataRoot(prompts, output)
-      // Use the home folder default on macOS/Linux.
       : join(homedir(), '.jarvis');
 
-    // Ensure Ollama CLI exists or install it after confirmation.
-    await ensureOllamaInstalled(system, prompts, { output });
-    // Ensure the Ollama server is reachable or start it after confirmation.
+    if (!system.isWindows) {
+      output.write(statusLine('success', 'Data core', dataRoot));
+    }
+
     await ensureOllamaServer(prompts, { output });
 
-    // Ask which model JARVIS should use.
-    const selectedModel = await prompts.ask('Select Ollama model', {
-      // Use environment override or the requested default model.
-      defaultValue: env.JARVIS_OLLAMA_MODEL ?? DEFAULT_MODEL,
-      // Validate that the user did not enter an empty model name.
-      validate(value) {
-        // Return null when valid or an error message when invalid.
-        return value.length > 0 ? null : 'Model name cannot be empty.';
-      },
-    });
-
-    // Ensure the selected model exists locally or pull it after confirmation.
-    await ensureModel(selectedModel, prompts, { output });
-    // Save the selected setup configuration.
-    await saveConfig({
-      // Store the chosen data root.
-      dataRoot,
-      // Store the selected model.
-      model: selectedModel,
-      // Store the Ollama host.
-      host: OLLAMA_HOST,
-      // Store basic detected system metadata.
-      system,
-      // Reuse prompts for overwrite confirmation.
-      prompts,
-      // Reuse output for status messages.
+    const modelStatus = await ensureSelectedModel(prompts, {
+      defaultModel: env.JARVIS_OLLAMA_MODEL ?? DEFAULT_MODEL,
       output,
     });
 
-    // Print the final online message with a typewriter effect.
-    await typewriter('JARVIS is online.', { output, speed: 20 });
-    // Print the final success banner.
+    output.write(section('CONFIGURATION'));
+    const configPath = await saveConfig({
+      dataRoot,
+      model: modelStatus.model,
+      host: OLLAMA_HOST,
+      system,
+      prompts,
+      output,
+    });
+
+    output.write(card('STATUS CARDS', [
+      ['OS', `${system.os} ${system.release}`],
+      ['Architecture', system.arch],
+      ['Selected drive', system.isWindows ? `${dataRoot.slice(0, 3)}` : 'Home'],
+      ['Ollama version', ollamaVersion],
+      ['Selected model', modelStatus.model],
+      ['Model status', modelStatus.pulled ? 'Downloaded' : 'Ready'],
+    ], { borderColor: 'cyan' }));
+    output.write('\n');
+
+    output.write(section('LAUNCH'));
+    await loading('Finalizing local intelligence core', { output, durationMs: 900 });
+    await playOnlineSequence({ output });
+    output.write(successBox('JARVIS is online. Local AI core ready.'));
+    output.write(card('CONFIG SUMMARY', [
+      ['Config', configPath ?? 'Unchanged'],
+      ['JARVIS data', dataRoot],
+      ['Ollama host', OLLAMA_HOST],
+      ['Model', modelStatus.model],
+    ], { borderColor: 'green' }));
+    output.write('\n');
     banner('JARVIS is online. Local AI core ready.', { output });
-    // Return setup details to callers.
-    return { status: 'ok', command: 'setup', model: selectedModel, dataRoot };
-  // Always release readline resources.
+
+    return {
+      status: 'ok',
+      command: 'setup',
+      model: modelStatus.model,
+      dataRoot,
+    };
+  } catch (error) {
+    output.write('\n');
+    output.write(errorBox(error.message));
+    process.exitCode = 1;
+    return { status: 'failed', command: 'setup', error };
   } finally {
-    // Close the prompt session.
     prompts.close();
   }
 }
 
-// Ask Windows users which drive should hold JARVIS data.
 async function chooseWindowsDataRoot(prompts, output) {
-  // Keep asking until the user approves a valid drive.
+  output.write(section('SELECT DATA CORE'));
+  output.write(warningBox(
+    'The selected drive is for JARVIS config, logs, workspace, and optional cache/model paths if supported later. Ollama may still install to its Windows default location.',
+  ));
+
+  const drives = await withSpinner('Detecting available Windows drives', async () => detectWindowsDrives(), { output });
+  output.write(statusLine('success', 'Available drives found', drives.map((drive) => drive.path).join(', ')));
+
   while (true) {
-    // Prompt for a drive letter.
-    const selectedDrive = await prompts.ask('Which drive should JARVIS data use?', {
-      // Default to C when the user presses Enter.
-      defaultValue: 'C',
-      // Validate the entered drive letter.
-      validate(value) {
-        // Check that the drive exists.
-        const result = validateWindowsDrive(value);
-        // Return null for valid drives or an error message.
-        return result.ok ? null : result.error;
+    const selectedDrive = await prompts.select(
+      'Choose where JARVIS should store its data. Ollama may still install to Windows default location.',
+      drives.map((drive) => ({
+      title: `${drive.path}  ${drive.label}`,
+      description: drive.description,
+      value: drive.drive,
+      })),
+      {
+        initial: Math.max(0, drives.findIndex((drive) => drive.recommended)),
       },
+    );
+
+    const drive = validateWindowsDrive(selectedDrive);
+    const dataRoot = join(drive.path, 'Jarvis', 'data');
+    const approved = await prompts.confirm(`Use ${theme.title(dataRoot)} for JARVIS data?`, {
+      defaultValue: true,
+      hint: 'This path is for JARVIS config, logs, workspace, and future optional cache/model paths. It does not control where Ollama installs.',
     });
 
-    // Normalize and validate the chosen drive again for path building.
-    const drive = validateWindowsDrive(selectedDrive);
-    // Build the JARVIS data folder on that drive.
-    const dataRoot = join(drive.path, 'Jarvis', 'data');
-    // Ask for confirmation before using the selected drive path.
-    const approved = await prompts.confirm(`Use ${dataRoot} for JARVIS data?`, { defaultValue: true });
-
-    // Return the path only after the user approves it.
     if (approved) {
-      // Tell the user which data path was selected.
-      output.write(`JARVIS data core selected: ${dataRoot}\n`);
-      // Return the approved path to the wizard.
+      output.write(statusLine('success', 'Selected drive', dataRoot));
+      output.write(divider());
       return dataRoot;
     }
   }
 }
 
-// Ensure Ollama is installed before model and server setup.
 async function ensureOllamaInstalled(system, prompts, { output }) {
-  // Check for the Ollama CLI with a spinner.
-  const initial = await withSpinner('Checking Ollama runtime...', () => getOllamaVersion(), { output });
+  output.write(section('OLLAMA RUNTIME'));
+  const initial = await withSpinner('Checking Ollama runtime', () => getOllamaVersion(), { output });
 
-  // Continue if Ollama is already installed.
   if (initial.exists) {
-    // Print the detected version.
-    output.write(`Ollama runtime detected: ${initial.version}\n`);
-    // Stop install flow because nothing else is needed.
-    return;
+    output.write(statusLine('success', 'Ollama runtime detected', initial.version));
+    return initial.version;
   }
 
-  // Ask before installing Ollama.
-  const approved = await prompts.confirm('Ollama is missing. Install Ollama now?', { defaultValue: true });
-  // Stop setup if installation is declined.
+  if (system.isWindows) {
+    const installedPath = findWindowsOllamaExecutable();
+
+    if (installedPath) {
+      output.write(statusLine('warning', 'Ollama installed but PATH missing', installedPath));
+      await repairWindowsOllamaPath(installedPath, { output });
+      const repaired = await withSpinner('Verifying Ollama PATH', () => getOllamaVersion(), { output });
+
+      if (repaired.exists) {
+        output.write(statusLine('success', 'Ollama runtime detected', repaired.version));
+        return repaired.version;
+      }
+
+      throw new Error('Ollama is installed, but JARVIS could not run "ollama --version" after updating PATH. Close and reopen your terminal, then try again.');
+    }
+  }
+
+  output.write(statusLine('warning', 'Ollama runtime', 'Not found'));
+  const approved = await prompts.confirm('Ollama runtime not found. Install now?', {
+    defaultValue: true,
+    hint: 'JARVIS needs Ollama to run the local model core.',
+  });
+
   if (!approved) {
-    // Tell the user where to install manually.
     throw new Error('Setup stopped. Install Ollama later from https://ollama.com/download');
   }
 
-  // Use the Windows installer flow on Windows.
   if (system.isWindows) {
-    // Warn that Windows may display UAC/admin UI.
-    output.write('Windows may show a UAC/admin popup during the Ollama installer.\n');
-    // Download the official installer with a spinner.
-    const installer = await withSpinner(
-      // Describe the installer download step.
-      'Downloading official Ollama Windows installer...',
-      // Download the installer and return its path.
-      () => downloadWindowsInstaller({ output }),
-      // Send spinner output to the selected stream.
-      { output },
-    );
-    // Run the downloaded installer.
-    await runWindowsInstaller(installer);
-  // Use the official shell installer on macOS/Linux.
+    output.write(warningBox(
+      'Ollama official Windows installer controls its own install location and may install on C:. JARVIS can still store its own data on your selected drive.',
+    ));
+    output.write(warningBox('Windows may show a UAC/admin popup during the Ollama installer.'));
+    let installer = null;
+
+    try {
+      installer = await withProgress('Downloading official Ollama Windows installer', () => (
+        downloadWindowsInstaller({ output: createSilentOutput() })
+      ), { output, durationMs: 1800 });
+      await withSpinner('Launching Ollama installer', () => runWindowsInstaller(installer), { output });
+    } finally {
+      if (installer) {
+        await removeInstallerFile(installer);
+        output.write(statusLine('success', 'Ollama installer removed', installer));
+      }
+    }
+
+    const installedPath = findWindowsOllamaExecutable();
+
+    if (installedPath) {
+      await repairWindowsOllamaPath(installedPath, { output });
+    }
   } else {
-    // Show the exact command before asking to run it.
-    output.write('About to run: curl -fsSL https://ollama.com/install.sh | sh\n');
-    // Ask before running the install command.
-    const runInstall = await prompts.confirm('Run official Ollama install command?', { defaultValue: true });
-    // Stop if the user declines the Unix install command.
+    output.write(warningBox('About to run: curl -fsSL https://ollama.com/install.sh | sh'));
+    const runInstall = await prompts.confirm('Run official Ollama install command?', {
+      defaultValue: true,
+      hint: 'This uses the official Ollama install method for macOS/Linux.',
+    });
+
     if (!runInstall) {
-      // Explain that setup stopped before mutation.
       throw new Error('Setup stopped before running the Ollama installer.');
     }
-    // Run the official macOS/Linux install command.
-    await runUnixOllamaInstall();
+
+    await withSpinner('Running official Ollama installer', () => runUnixOllamaInstall(), { output });
   }
 
-  // Verify Ollama exists after installation.
-  const afterInstall = await withSpinner('Verifying Ollama installation...', () => getOllamaVersion(), { output });
+  const afterInstall = await withSpinner('Verifying Ollama installation', () => getOllamaVersion(), { output });
 
-  // Fail with a helpful message if Ollama is still unavailable.
   if (!afterInstall.exists) {
-    // Suggest reopening the terminal because PATH may not be refreshed.
-    throw new Error(
-      'Ollama is still missing after install. Close and reopen your terminal, then run "ollama --version".',
-    );
+    throw new Error('Ollama is still missing after install. Close and reopen your terminal, then run "ollama --version".');
   }
 
-  // Print the verified Ollama version.
-  output.write(`Ollama runtime detected: ${afterInstall.version}\n`);
+  output.write(statusLine('success', 'Ollama runtime detected', afterInstall.version));
+  return afterInstall.version;
 }
 
-// Ensure the Ollama HTTP server is reachable.
-async function ensureOllamaServer(prompts, { output }) {
-  // Check the local Ollama API endpoint with a spinner.
-  const running = await withSpinner(
-    // Describe the server readiness check.
-    'Checking local Ollama server...',
-    // Test the /api/tags endpoint.
-    () => isOllamaServerRunning({ host: OLLAMA_HOST }),
-    // Send spinner output to the selected stream.
-    { output },
-  );
+async function repairWindowsOllamaPath(installedPath, { output }) {
+  const installDir = dirname(installedPath);
+  const pathUpdate = await ensureWindowsPathContains(installDir);
 
-  // Continue if the server is already running.
-  if (running) {
-    // Tell the user the API is reachable.
-    output.write('Local Ollama server responding at http://localhost:11434/api/tags\n');
-    // Stop server setup because it is ready.
+  if (pathUpdate.userChanged) {
+    output.write(statusLine('success', 'Ollama PATH saved', installDir));
     return;
   }
 
-  // Ask before starting the server.
-  const start = await prompts.confirm('Ollama server is not running. Start it with "ollama serve"?', {
-    // Default to starting because setup needs the server.
-    defaultValue: true,
-  });
-
-  // Stop setup if the user declines server startup.
-  if (!start) {
-    // Tell the user how to start manually.
-    throw new Error('Setup stopped. Start Ollama later with: ollama serve');
+  if (pathUpdate.currentChanged) {
+    output.write(statusLine('success', 'Ollama PATH active for setup', installDir));
+    return;
   }
 
-  // Start the server in the background.
-  const pid = startOllamaServer();
-  // Print the launch result and pid when available.
-  output.write(`Ollama serve launch requested${pid ? ` (pid ${pid})` : ''}.\n`);
-  // Wait until the API responds.
-  const ready = await withSpinner(
-    // Describe the wait step in JARVIS language.
-    'Waiting for local intelligence core...',
-    // Poll the server until ready or timed out.
-    () => waitForOllamaServer({ host: OLLAMA_HOST }),
-    // Send spinner output to the selected stream.
+  output.write(statusLine('success', 'Ollama PATH already configured', installDir));
+}
+
+async function ensureOllamaServer(prompts, { output }) {
+  const running = await withSpinner(
+    'Checking local Ollama server',
+    () => isOllamaServerRunning({ host: OLLAMA_HOST }),
     { output },
   );
 
-  // Fail if the server never responded.
+  if (running) {
+    output.write(statusLine('success', 'Ollama server', 'http://localhost:11434/api/tags'));
+    return;
+  }
+
+  output.write(statusLine('warning', 'Ollama server', 'Not running'));
+  const start = await prompts.confirm('Ollama server is not running. Start it with "ollama serve"?', {
+    defaultValue: true,
+    hint: 'The server must be reachable before JARVIS can inspect or pull models.',
+  });
+
+  if (!start) {
+    throw new Error('Setup stopped. Start Ollama later with: ollama serve');
+  }
+
+  const pid = startOllamaServer();
+  output.write(statusLine('info', 'Ollama serve launch requested', pid ? `pid ${pid}` : 'started'));
+  const ready = await withSpinner(
+    'Waiting for local intelligence core',
+    () => waitForOllamaServer({ host: OLLAMA_HOST }),
+    { output },
+  );
+
   if (!ready) {
-    // Give the exact endpoint and manual command.
     throw new Error('Ollama server did not respond at http://localhost:11434/api/tags. Try running "ollama serve".');
   }
+
+  output.write(statusLine('success', 'Ollama server', 'Online'));
 }
 
-// Save setup configuration to the selected data folder.
+async function ensureSelectedModel(prompts, { defaultModel, output }) {
+  output.write(section('MODEL CORE'));
+  const selectedModel = await prompts.select('Select local model core', [
+    {
+      title: `${DEFAULT_MODEL}  Recommended`,
+      description: 'Gemma 4 edge model with stronger reasoning, coding, and agent workflows.',
+      value: DEFAULT_MODEL,
+    },
+    {
+      title: 'gemma4:e2b  Lightweight',
+      description: 'Smaller Gemma 4 edge model for lower-memory machines.',
+      value: 'gemma4:e2b',
+    },
+    {
+      title: 'gemma4:12b  Workstation',
+      description: 'Higher-capability Gemma 4 model for stronger local hardware.',
+      value: 'gemma4:12b',
+    },
+    {
+      title: 'gemma3:1b  Gemma 3 fallback',
+      description: 'Older compact option when Gemma 4 is too large.',
+      value: 'gemma3:1b',
+    },
+    {
+      title: `${defaultModel}  Environment default`,
+      description: 'Use JARVIS_OLLAMA_MODEL from your environment.',
+      value: defaultModel,
+    },
+  ], { initial: 0 });
+
+  const list = await withSpinner('Scanning installed model cores', () => getOllamaModels(), { output });
+
+  if (!list.ok) {
+    throw new Error(`Could not inspect Ollama models: ${list.output}`);
+  }
+
+  if (hasModel(list.models, selectedModel)) {
+    output.write(statusLine('success', 'Model core detected', selectedModel));
+    return { model: selectedModel, pulled: false };
+  }
+
+  output.write(statusLine('warning', 'Model core missing', selectedModel));
+  const shouldPull = await prompts.confirm(`Model ${selectedModel} not found. Download now?`, {
+    defaultValue: true,
+    hint: 'Model downloads can be large and may take several minutes.',
+  });
+
+  if (!shouldPull) {
+    throw new Error(`Setup stopped. Pull "${selectedModel}" later with: ollama pull ${selectedModel}`);
+  }
+
+  const result = await withProgress(`Downloading model core ${selectedModel}`, () => (
+    pullModel(selectedModel, { stdio: ['ignore', 'pipe', 'pipe'] })
+  ), { output, durationMs: 2500 });
+
+  if (!result.ok) {
+    throw new Error(result.stderr || `Failed to pull model "${selectedModel}".`);
+  }
+
+  output.write(statusLine('success', 'Model core downloaded', selectedModel));
+  return { model: selectedModel, pulled: true };
+}
+
 async function saveConfig({ dataRoot, model, host, system, prompts, output }) {
-  // Build the config file path.
   const configPath = join(dataRoot, 'config.json');
-  // Ensure the config folder exists.
   await mkdir(dirname(configPath), { recursive: true });
 
-  // Ask before overwriting an existing config file.
   if (existsSync(configPath)) {
-    // Prompt the user because overwriting is a file mutation.
-    const overwrite = await prompts.confirm(`Config already exists at ${configPath}. Overwrite it?`, {
-      // Default to no so existing files are safe.
+    const overwrite = await prompts.confirm(`Config already exists at ${theme.title(configPath)}. Overwrite it?`, {
       defaultValue: false,
+      hint: 'Choosing no keeps your existing JARVIS configuration untouched.',
     });
 
-    // Leave the existing file untouched if declined.
     if (!overwrite) {
-      // Tell the user the config was not changed.
-      output.write(`Config left unchanged: ${configPath}\n`);
-      // Exit config saving early.
-      return;
+      output.write(statusLine('warning', 'Config unchanged', configPath));
+      return null;
     }
   }
 
-  // Build the config object to write as JSON.
   const config = {
-    // Store the agent name.
     name: 'JARVIS',
-    // Store the selected model.
     model,
-    // Store the Ollama host URL.
     host,
-    // Store the selected data root.
     dataRoot,
-    // Store the setup timestamp.
     createdAt: new Date().toISOString(),
-    // Store basic host system information.
     system: {
-      // Store the friendly OS name.
       os: system.os,
-      // Store the raw platform name.
       platform: system.platform,
-      // Store the CPU architecture label.
       arch: system.arch,
     },
   };
 
-  // Write the config JSON to disk.
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { flag: 'w' });
-  // Tell the user where the config was saved.
-  output.write(`Configuration saved: ${configPath}\n`);
+  output.write(statusLine('success', 'Configuration saved', configPath));
+  return configPath;
+}
+
+function detectWindowsDrives() {
+  const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+  const drives = letters
+    .map((letter) => validateWindowsDrive(letter))
+    .filter((drive) => drive.ok)
+    .map((drive) => {
+      const systemDrive = drive.drive === 'C';
+      const recommended = drive.drive !== 'C';
+
+      return {
+        drive: drive.drive,
+        path: drive.path,
+        label: systemDrive ? 'System Drive' : recommended ? 'Recommended' : 'Available',
+        description: systemDrive
+          ? 'Stores JARVIS data on the default Windows system drive.'
+          : 'Recommended for JARVIS data/config/logs/workspace separate from the system drive.',
+        recommended,
+      };
+    });
+
+  if (drives.length === 0) {
+    const fallback = validateWindowsDrive('C');
+
+    if (!fallback.ok) {
+      throw new Error('No available Windows drives were detected.');
+    }
+
+    return [{
+      drive: fallback.drive,
+      path: fallback.path,
+      label: 'System Drive',
+      description: 'Stores JARVIS data on the default Windows system drive.',
+      recommended: true,
+    }];
+  }
+
+  return drives;
+}
+
+function createSilentOutput() {
+  return {
+    isTTY: false,
+    write() {},
+  };
 }

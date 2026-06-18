@@ -3,12 +3,14 @@ import { ChatRepository } from '../repositories/chatRepository.js';
 import { MessageRepository } from '../repositories/messageRepository.js';
 import { SessionRepository } from '../repositories/sessionRepository.js';
 import { NoChatSessionError } from '../core/errors.js';
-import { formatSystemReport, getSystemReport } from '../core/systemCheck.js';
+import { getSystemReport } from '../core/systemCheck.js';
 import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
 import { createModelConfig } from '../services/modelConfigService.js';
 import { OllamaService } from '../services/ollamaService.js';
 import { runSetupWizard } from '../setup/setupWizard.js';
+import { renderDoctorReport } from '../ui/doctor.js';
+import { warningBox } from '../ui/theme.js';
 import { printHelp, printVersion } from './commands.js';
 import { parseCommand } from './parser.js';
 
@@ -36,8 +38,11 @@ export async function runCli(args, context = {}) {
 
   // Handle doctor command.
   if (command.command === 'doctor') {
-    // Print the local system readiness report.
-    output(formatSystemReport(await getSystemReport()));
+    // Render the themed local system readiness report.
+    await renderDoctorReport({
+      getReport: getSystemReport,
+      output: context.outputStream ?? process.stdout,
+    });
     // Return a command status for callers.
     return { status: 'ok', command: 'doctor' };
   }
@@ -125,7 +130,7 @@ export async function runCli(args, context = {}) {
       // Check for the expected empty-history case.
       if (error instanceof NoChatSessionError) {
         // Print the friendly no-session message.
-        output(error.message);
+        output(warningBox(error.message));
         // Return an empty status instead of throwing.
         return { status: 'empty', command: 'resume' };
       }

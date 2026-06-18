@@ -121,12 +121,14 @@ export class ChatLoopService {
     // Save and respond to the user message.
     try {
       // Ask the chat service to persist and generate a reply.
-      const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message);
+      const { assistantMessage } = await this.ui.thinking(
+        () => this.chatService.respondToUserMessage(chatId, message),
+      );
 
       // Print assistant replies when present.
       if (assistantMessage) {
         // Render the assistant message.
-        this.ui.assistant(assistantMessage.content);
+        await this.ui.assistant(assistantMessage.content);
         // Keep the chat loop running.
         return false;
       }

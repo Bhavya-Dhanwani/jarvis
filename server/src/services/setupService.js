@@ -95,9 +95,9 @@ export function formatSetupReport(report) {
   // Add environment override heading.
   lines.push('Optional model override:');
   // Show PowerShell override syntax.
-  lines.push('  PowerShell: $env:JARVIS_OLLAMA_MODEL="gemma3:1b"');
+  lines.push('  PowerShell: $env:JARVIS_OLLAMA_MODEL="gemma4:e2b"');
   // Show Bash override syntax.
-  lines.push('  Bash: export JARVIS_OLLAMA_MODEL="gemma3:1b"');
+  lines.push('  Bash: export JARVIS_OLLAMA_MODEL="gemma4:e2b"');
 
   // Join the report lines.
   return lines.join('\n');

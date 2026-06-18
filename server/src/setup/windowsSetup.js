@@ -1,7 +1,7 @@
 // Import file helpers for drive checks and installer writes.
 import { createWriteStream, existsSync } from 'node:fs';
 // Import mkdtemp to create a safe temporary download folder.
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 // Import https.get to download the official installer.
 import { get } from 'node:https';
 // Import tmpdir so downloads go into the OS temp folder.
@@ -13,6 +13,61 @@ import { spawn } from 'node:child_process';
 
 // Store the official Ollama Windows installer URL.
 const WINDOWS_INSTALLER_URL = 'https://ollama.com/download/OllamaSetup.exe';
+
+// Find a Windows Ollama install that exists but is not exposed on PATH.
+export function findWindowsOllamaExecutable(env = process.env) {
+  // Check the default per-user install first because Ollama commonly installs there.
+  const candidates = [
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe') : null,
+    env.ProgramFiles ? join(env.ProgramFiles, 'Ollama', 'ollama.exe') : null,
+    env['ProgramFiles(x86)'] ? join(env['ProgramFiles(x86)'], 'Ollama', 'ollama.exe') : null,
+  ].filter(Boolean);
+
+  // Return the first real executable path.
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+// Ensure the Ollama install directory is available now and in future terminals.
+export async function ensureWindowsPathContains(directory, { env = process.env } = {}) {
+  // Add the path to the current process so the rest of setup can keep going.
+  const currentChanged = addDirectoryToEnvPath(directory, env);
+  // Read the persistent user PATH from HKCU\Environment.
+  const userPath = await readUserPath();
+
+  // Nothing else to do when future terminals already include the directory.
+  if (pathContainsDirectory(userPath, directory)) {
+    return { currentChanged, userChanged: false };
+  }
+
+  // Append the directory to the persistent user PATH without requiring admin rights.
+  const newUserPath = appendPathEntry(userPath, directory);
+  const result = await runWindowsCommand('reg.exe', [
+    'add',
+    'HKCU\\Environment',
+    '/v',
+    'Path',
+    '/t',
+    'REG_EXPAND_SZ',
+    '/d',
+    newUserPath,
+    '/f',
+  ]);
+
+  if (!result.ok) {
+    throw new Error(result.stderr || result.stdout || 'Could not update the Windows user PATH.');
+  }
+
+  return { currentChanged, userChanged: true };
+}
+
+// Delete a downloaded installer after the installer process exits.
+export async function removeInstallerFile(installerPath) {
+  if (!installerPath) {
+    return;
+  }
+
+  await rm(installerPath, { force: true });
+}
 
 // Validate a Windows drive letter entered by the user.
 export function validateWindowsDrive(drive) {
@@ -92,6 +147,98 @@ export function runWindowsInstaller(installerPath) {
       reject(new Error(`Ollama installer exited with code ${code}.`));
     });
   });
+}
+
+// Read the current user's persisted PATH value from the registry.
+async function readUserPath() {
+  const result = await runWindowsCommand('reg.exe', [
+    'query',
+    'HKCU\\Environment',
+    '/v',
+    'Path',
+  ]);
+
+  if (!result.ok) {
+    return '';
+  }
+
+  const line = result.stdout
+    .split(/\r?\n/)
+    .find((entry) => /\sPath\s+REG_/.test(entry));
+
+  if (!line) {
+    return '';
+  }
+
+  return line.replace(/^\s*Path\s+REG_\w+\s+/, '').trim();
+}
+
+// Run a small Windows utility and capture output.
+function runWindowsCommand(command, args) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    const child = spawn(command, args, {
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on('error', (error) => {
+      resolve({ ok: false, code: null, stdout, stderr, error });
+    });
+
+    child.on('close', (code) => {
+      resolve({ ok: code === 0, code, stdout, stderr, error: null });
+    });
+  });
+}
+
+// Add a directory to the current process PATH.
+function addDirectoryToEnvPath(directory, env) {
+  const key = Object.keys(env).find((name) => name.toLowerCase() === 'path') ?? 'Path';
+  const current = env[key] ?? '';
+
+  if (pathContainsDirectory(current, directory)) {
+    return false;
+  }
+
+  env[key] = appendPathEntry(current, directory);
+  return true;
+}
+
+// Append a PATH entry with one trailing semicolon for Windows tools.
+function appendPathEntry(pathValue, directory) {
+  const trimmed = pathValue.trim();
+
+  if (!trimmed) {
+    return `${directory};`;
+  }
+
+  return `${trimmed.replace(/;+$/, '')};${directory};`;
+}
+
+// Compare PATH entries case-insensitively on Windows.
+function pathContainsDirectory(pathValue, directory) {
+  const target = normalizePathEntry(directory);
+
+  return pathValue
+    .split(';')
+    .map(normalizePathEntry)
+    .some((entry) => entry === target);
+}
+
+// Normalize a PATH entry for comparison.
+function normalizePathEntry(entry) {
+  return entry.trim().replace(/[\\/]+$/, '').toLowerCase();
 }
 
 // Download a URL to a local destination file.
