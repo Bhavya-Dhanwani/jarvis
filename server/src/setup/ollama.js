@@ -1,5 +1,11 @@
 // Import spawn so commands run without unsafe shell interpolation.
 import { spawn } from 'node:child_process';
+// Import platform to run Windows-only PATH repair.
+import { platform } from 'node:os';
+// Import dirname so the Ollama install folder can be added to PATH.
+import { dirname } from 'node:path';
+// Import Windows helpers for Ollama installs that exist but are missing from PATH.
+import { ensureWindowsPathContains, findWindowsOllamaExecutable } from './windowsSetup.js';
 
 // Define the local Ollama API endpoint used by JARVIS.
 export const OLLAMA_HOST = 'http://localhost:11434';
@@ -20,14 +26,53 @@ export async function getOllamaVersion() {
     };
   }
 
+  // On Windows, repair installs where ollama.exe exists but PATH is stale.
+  if (platform() === 'win32') {
+    const repaired = await repairWindowsOllamaPath();
+
+    if (repaired.exists) {
+      return repaired;
+    }
+  }
+
   // Return a missing result when the command fails.
+  return missingOllamaResult(result.error);
+}
+
+async function repairWindowsOllamaPath() {
+  const installedPath = findWindowsOllamaExecutable();
+
+  if (!installedPath) {
+    return missingOllamaResult();
+  }
+
+  try {
+    const pathUpdate = await ensureWindowsPathContains(dirname(installedPath));
+    const result = await runCommand(installedPath, ['--version']);
+
+    if (!result.ok) {
+      return missingOllamaResult(result.error);
+    }
+
+    return {
+      exists: true,
+      version: result.stdout.trim() || 'Ollama detected',
+      path: installedPath,
+      pathUpdated: pathUpdate.userChanged || pathUpdate.currentChanged,
+    };
+  } catch (error) {
+    return missingOllamaResult(error);
+  }
+}
+
+function missingOllamaResult(error = null) {
   return {
     // Mark Ollama as not installed or not on PATH.
     exists: false,
     // No version is available when missing.
     version: null,
     // Keep the error for callers that want diagnostics.
-    error: result.error,
+    error,
   };
 }
 

@@ -4,6 +4,10 @@ import { execFile } from 'node:child_process';
 import { cpus, freemem, platform, release, totalmem } from 'node:os';
 // Import promisify to convert execFile into a promise API.
 import { promisify } from 'node:util';
+// Import Windows Ollama helpers for installs that are present but missing from PATH.
+import { ensureWindowsPathContains, findWindowsOllamaExecutable } from '../setup/windowsSetup.js';
+// Import dirname so the found executable folder can be added to PATH.
+import { dirname } from 'node:path';
 
 // Create a promise-based execFile helper.
 const execFileAsync = promisify(execFile);
@@ -151,16 +155,51 @@ async function checkOllamaCli() {
       // Store the trimmed version output.
       version: stdout.trim(),
     };
-  // Treat any command failure as Ollama missing.
-  } catch {
-    // Return a missing Ollama result.
-    return {
-      // Mark Ollama as unavailable.
-      available: false,
-      // No version is available.
-      version: null,
-    };
+  // Try the Windows default install locations when PATH cannot resolve ollama.
+  } catch (error) {
+    return repairWindowsOllamaDetection(error);
   }
+}
+
+// Repair Windows installs where Ollama exists but the shell PATH is missing it.
+async function repairWindowsOllamaDetection(originalError) {
+  if (platform() !== 'win32') {
+    return missingOllamaResult(originalError);
+  }
+
+  const installedPath = findWindowsOllamaExecutable();
+
+  if (!installedPath) {
+    return missingOllamaResult(originalError);
+  }
+
+  try {
+    const pathUpdate = await ensureWindowsPathContains(dirname(installedPath));
+    const { stdout } = await execFileAsync(installedPath, ['--version'], {
+      windowsHide: true,
+    });
+
+    return {
+      available: true,
+      version: stdout.trim(),
+      path: installedPath,
+      pathUpdated: pathUpdate.userChanged || pathUpdate.currentChanged,
+    };
+  } catch (error) {
+    return missingOllamaResult(error);
+  }
+}
+
+// Return a consistent missing result with optional diagnostics.
+function missingOllamaResult(error) {
+  return {
+    // Mark Ollama as unavailable.
+    available: false,
+    // No version is available.
+    version: null,
+    // Preserve the error for callers that want diagnostics.
+    error,
+  };
 }
 
 // Convert bytes into a one-decimal gigabyte value.

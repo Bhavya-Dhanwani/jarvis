@@ -177,6 +177,10 @@ async function ensureOllamaInstalled(system, prompts, { output }) {
   const initial = await withSpinner('Checking Ollama runtime', () => getOllamaVersion(), { output });
 
   if (initial.exists) {
+    if (initial.pathUpdated && initial.path) {
+      output.write(statusLine('success', 'Ollama PATH saved', dirname(initial.path)));
+    }
+
     output.write(statusLine('success', 'Ollama runtime detected', initial.version));
     return initial.version;
   }

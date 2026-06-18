@@ -15,7 +15,7 @@ export async function renderDoctorReport({ getReport, output = process.stdout } 
 
   output.write(section('OLLAMA RUNTIME'));
   output.write(report.ollama.available
-    ? statusLine('success', 'Ollama CLI', report.ollama.version)
+    ? statusLine('success', 'Ollama CLI', formatOllamaStatus(report.ollama))
     : statusLine('warning', 'Ollama CLI', 'not found'));
 
   output.write(section('MODEL RECOMMENDATION'));
@@ -32,4 +32,12 @@ export async function renderDoctorReport({ getReport, output = process.stdout } 
     : warningBox('Diagnostics complete. Run "jarvis setup" to install and configure Ollama.'));
 
   return report;
+}
+
+function formatOllamaStatus(ollama) {
+  if (ollama.pathUpdated) {
+    return `${ollama.version} (PATH repaired)`;
+  }
+
+  return ollama.version;
 }
