@@ -1,4 +1,6 @@
+// Print CLI help text.
 export function printHelp(output = console.log) {
+  // Send usage instructions to the chosen output function.
   output(`Jarvis CLI
 
 Usage:
@@ -12,6 +14,8 @@ Options:
   -v, --version   Show version`);
 }
 
+// Print the package version.
 export function printVersion(packageInfo, output = console.log) {
+  // Send the version string to the chosen output function.
   output(packageInfo.version);
 }
