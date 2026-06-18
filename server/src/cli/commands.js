@@ -5,7 +5,7 @@ Usage:
   jarvis          Start a new chat session
   jarvis resume   Resume the most recent chat session
   jarvis doctor   Check local system and Ollama readiness
-  jarvis setup    Show guided local AI setup steps
+  jarvis setup    Run guided first-run local AI setup
 
 Options:
   -h, --help      Show help
