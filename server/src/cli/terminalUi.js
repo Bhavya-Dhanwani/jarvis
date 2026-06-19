@@ -35,15 +35,31 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
     },
 
     prompt() {
-      return `${theme.accent('❯')} ${theme.primary('you')} ${theme.dim('›')} `;
+      return `${theme.accent('>')} ${theme.primary('you')} ${theme.dim('>')} `;
     },
 
     saved() {
       output.write(statusLine('success', 'Saved', 'message persisted locally'));
     },
 
-    async thinking(action) {
+    thinking(action) {
       return withSpinner('JARVIS is thinking', action, { output });
+    },
+
+    warming(action) {
+      return withSpinner('Warming local model', action, { output });
+    },
+
+    assistantStart() {
+      output.write(`${theme.cyan('JARVIS')} ${theme.dim('>')} `);
+    },
+
+    assistantChunk(chunk) {
+      output.write(chunk);
+    },
+
+    assistantEnd() {
+      output.write('\n');
     },
 
     sessionSaved() {
@@ -51,7 +67,7 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
     },
 
     async assistant(message) {
-      output.write(`${theme.cyan('JARVIS')} ${theme.dim('›')} `);
+      output.write(`${theme.cyan('JARVIS')} ${theme.dim('>')} `);
 
       if (!output.isTTY) {
         output.write(`${message}\n`);

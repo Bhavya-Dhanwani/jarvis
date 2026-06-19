@@ -70,6 +70,10 @@ export class ChatLoopService {
         return { status: 'closed', chatId: chat.id };
       }
 
+      if (options.modelConfig?.warmOnStart === true) {
+        await this.#warmAssistant();
+      }
+
       // Keep prompting forever in interactive mode.
       while (true) {
         // Ask for the next line.
@@ -99,6 +103,15 @@ export class ChatLoopService {
     }
   }
 
+  // Warm the local model before the first interactive prompt.
+  async #warmAssistant() {
+    try {
+      await this.ui.warming?.(() => this.chatService.warmAssistant());
+    } catch (error) {
+      this.ui.unavailable(`model warm-up skipped: ${error.message}`);
+    }
+  }
+
   // Handle one user input line.
   async #handleLine(chatId, line) {
     // Trim whitespace from the entered line.
@@ -120,13 +133,29 @@ export class ChatLoopService {
 
     // Save and respond to the user message.
     try {
+      let streamed = false;
+      let streamStarted = false;
+
       // Ask the chat service to persist and generate a reply.
-      const { assistantMessage } = await this.ui.thinking(
-        () => this.chatService.respondToUserMessage(chatId, message),
-      );
+      const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message, {
+        onToken: (chunk) => {
+          if (!streamStarted) {
+            this.ui.assistantStart?.();
+            streamStarted = true;
+          }
+
+          streamed = true;
+          this.ui.assistantChunk?.(chunk);
+        },
+      });
 
       // Print assistant replies when present.
       if (assistantMessage) {
+        if (streamed) {
+          this.ui.assistantEnd?.();
+          return false;
+        }
+
         // Render the assistant message.
         await this.ui.assistant(assistantMessage.content);
         // Keep the chat loop running.

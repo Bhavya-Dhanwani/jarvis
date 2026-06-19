@@ -382,13 +382,13 @@ async function saveConfig({ dataRoot, model, host, system, prompts, output }) {
   await mkdir(dirname(configPath), { recursive: true });
 
   if (existsSync(configPath)) {
-    const overwrite = await prompts.confirm(`Config already exists at ${theme.title(configPath)}. Overwrite it?`, {
-      defaultValue: false,
-      hint: 'Choosing no keeps your existing JARVIS configuration untouched.',
+    const overwrite = await prompts.confirm(`Config already exists at ${theme.title(configPath)}. Update it with the selected model?`, {
+      defaultValue: true,
+      hint: 'Choosing yes makes this setup selection the active JARVIS model.',
     });
 
     if (!overwrite) {
-      output.write(statusLine('warning', 'Config unchanged', configPath));
+      output.write(statusLine('warning', 'Config unchanged', `${configPath} (active model may differ)`));
       return null;
     }
   }

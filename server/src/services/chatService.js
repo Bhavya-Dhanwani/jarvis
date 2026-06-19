@@ -92,8 +92,17 @@ export class ChatService {
     return message;
   }
 
+  // Prepare the assistant model before the first prompt when supported.
+  async warmAssistant() {
+    if (typeof this.assistantService?.warmUp !== 'function') {
+      return;
+    }
+
+    await this.assistantService.warmUp();
+  }
+
   // Save a user message and optionally generate an assistant reply.
-  async respondToUserMessage(chatId, content) {
+  async respondToUserMessage(chatId, content, { onToken = null } = {}) {
     // Persist the user's message first.
     const userMessage = this.saveUserMessage(chatId, content);
 
@@ -106,7 +115,7 @@ export class ChatService {
     // Load full chat history for the assistant.
     const messages = this.messageRepository.listByChatId(chatId);
     // Generate a reply from the assistant service.
-    const reply = await this.assistantService.generateReply(messages);
+    const reply = await this.assistantService.generateReply(messages, { onToken });
     // Save the assistant reply, preserving empty responses visibly.
     const assistantMessage = this.saveAssistantMessage(chatId, reply || '(empty response)');
 

@@ -80,7 +80,7 @@ export function getModelRecommendation(totalMemoryGb) {
       // Select the medium model.
       model: 'gemma4:e4b',
       // Use a medium context window.
-      context: 6144,
+      context: 4096,
       // Use a moderate temperature.
       temperature: 0.6,
     };
@@ -94,8 +94,8 @@ export function getModelRecommendation(totalMemoryGb) {
       size: 'small',
       // Select the small model.
       model: 'gemma4:e2b',
-      // Use a balanced context window.
-      context: 4096,
+      // Use a responsive context window for typical local systems.
+      context: 2048,
       // Use a slightly warmer temperature.
       temperature: 0.7,
     };

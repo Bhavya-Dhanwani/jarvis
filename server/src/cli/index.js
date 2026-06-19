@@ -70,8 +70,10 @@ export async function runCli(args, context = {}) {
   if (command.command === 'new') {
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
+    // Resolve the model once so display and requests stay aligned.
+    const modelConfig = createModelConfig({ env: context.env ?? process.env });
     // Build the chat service for persistence and model replies.
-    const chatService = createChatService(database, context);
+    const chatService = createChatService(database, { ...context, modelConfig });
     // Build the terminal chat loop service.
     const chatLoopService = new ChatLoopService({
       // Pass the chat service into the loop.
@@ -87,7 +89,7 @@ export async function runCli(args, context = {}) {
       // Create a new chat record.
       const { chat } = chatService.startNewChat();
       // Start the chat loop for that new chat.
-      return await chatLoopService.run(chat);
+      return await chatLoopService.run(chat, { modelConfig });
     // Close only databases created in this function.
     } finally {
       // Keep injected test databases open for the caller.
@@ -102,8 +104,10 @@ export async function runCli(args, context = {}) {
   if (command.command === 'resume') {
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
+    // Resolve the model once so display and requests stay aligned.
+    const modelConfig = createModelConfig({ env: context.env ?? process.env });
     // Build the chat service for persistence and model replies.
-    const chatService = createChatService(database, context);
+    const chatService = createChatService(database, { ...context, modelConfig });
     // Build the terminal chat loop service.
     const chatLoopService = new ChatLoopService({
       // Pass the chat service into the loop.
@@ -124,6 +128,8 @@ export async function runCli(args, context = {}) {
         mode: 'resume',
         // Show how many messages were loaded.
         messageCount: messages.length,
+        // Show the same model config used by the Ollama service.
+        modelConfig,
       });
     // Convert no-chat errors into friendly output.
     } catch (error) {
@@ -154,7 +160,7 @@ export async function runCli(args, context = {}) {
 // Build the chat service and its dependencies.
 function createChatService(database, context = {}) {
   // Create the Ollama model configuration.
-  const modelConfig = createModelConfig();
+  const modelConfig = context.modelConfig ?? createModelConfig({ env: context.env ?? process.env });
 
   // Return a chat service with repositories and assistant service wired in.
   return new ChatService({

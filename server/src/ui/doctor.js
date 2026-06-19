@@ -1,4 +1,5 @@
 import { playDoctorSequence } from './ascii.js';
+import { createModelConfig } from '../services/modelConfigService.js';
 import { loading, withSpinner } from './spinner.js';
 import { card, section, statusLine, successBox, warningBox } from './theme.js';
 
@@ -6,6 +7,7 @@ export async function renderDoctorReport({ getReport, output = process.stdout } 
   await playDoctorSequence({ output });
   output.write(section('SYSTEM SCAN'));
   const report = await withSpinner('Collecting host diagnostics', getReport, { output });
+  const modelConfig = createModelConfig({ totalMemoryGb: report.memory.totalGb });
 
   await loading('Analyzing local AI readiness', { output, durationMs: 650 });
   output.write(statusLine('success', 'OS detected', `${report.os.platform} ${report.os.release}`));
@@ -18,12 +20,14 @@ export async function renderDoctorReport({ getReport, output = process.stdout } 
     ? statusLine('success', 'Ollama CLI', formatOllamaStatus(report.ollama))
     : statusLine('warning', 'Ollama CLI', 'not found'));
 
-  output.write(section('MODEL RECOMMENDATION'));
+  output.write(section('MODEL CORE'));
   output.write(card('LOCAL CORE PROFILE', [
     ['Profile', report.recommendation.size],
-    ['Model', report.recommendation.model],
-    ['Context', report.recommendation.context],
-    ['Temperature', report.recommendation.temperature],
+    ['Selected model', modelConfig.model],
+    ['Config source', formatConfigSource(modelConfig.source)],
+    ['Recommended model', report.recommendation.model],
+    ['Context', modelConfig.options.num_ctx],
+    ['Temperature', modelConfig.options.temperature],
   ], { borderColor: report.ollama.available ? 'green' : 'yellow' }));
   output.write('\n');
 
@@ -32,6 +36,18 @@ export async function renderDoctorReport({ getReport, output = process.stdout } 
     : warningBox('Diagnostics complete. Run "jarvis setup" to install and configure Ollama.'));
 
   return report;
+}
+
+function formatConfigSource(source) {
+  if (source === 'saved-config') {
+    return 'setup selection';
+  }
+
+  if (source === 'env') {
+    return 'environment';
+  }
+
+  return 'hardware recommendation';
 }
 
 function formatOllamaStatus(ollama) {
