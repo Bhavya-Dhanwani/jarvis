@@ -1,5 +1,5 @@
 // Define all supported CLI commands.
-const COMMANDS = new Set(['new', 'resume', 'doctor', 'setup', 'help', 'version']);
+const COMMANDS = new Set(['new', 'resume', 'code', 'doctor', 'setup', 'help', 'version']);
 
 // Parse raw CLI arguments into a command object.
 export function parseCommand(args) {

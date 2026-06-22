@@ -6,6 +6,7 @@ import { NoChatSessionError } from '../core/errors.js';
 import { getSystemReport } from '../core/systemCheck.js';
 import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
+import { createCodingAgentService } from '../services/codingAgentService.js';
 import { createModelConfig } from '../services/modelConfigService.js';
 import { OllamaService } from '../services/ollamaService.js';
 import { runSetupWizard } from '../setup/setupWizard.js';
@@ -64,6 +65,41 @@ export async function runCli(args, context = {}) {
   if (command.command === 'unknown') {
     // Throw a usage-focused error.
     throw new Error(`${command.error}\nRun "jarvis --help" for usage.`);
+  }
+
+  // Handle coding agent command.
+  if (command.command === 'code') {
+    // Join command arguments into one coding request.
+    const request = command.args.join(' ').trim();
+
+    // Require a request so the planner has meaningful input.
+    if (!request) {
+      throw new Error('Coding request is required.\nUsage: jarvis code "<request>"');
+    }
+
+    // Reuse an injected coding service or build the Ollama-backed workflow.
+    const codingAgentService = context.codingAgentService ?? createCodingAgentService({
+      assistantService: context.assistantService,
+      env: context.env ?? process.env,
+    });
+
+    // Run the planner, workers, and review pipeline.
+    const result = await codingAgentService.run(request, {
+      cwd: context.cwd ?? process.cwd(),
+      onEvent: (event) => renderCodingEvent(event, output),
+    });
+    // Load the final review result.
+    const review = result.results.get('review-task');
+
+    // Print the reviewed response after task progress.
+    output(review?.output ?? review?.summary ?? 'Coding workflow completed without a review response.');
+
+    // Return command details for callers and tests.
+    return {
+      status: result.status,
+      command: 'code',
+      result,
+    };
   }
 
   // Handle new chat command.
@@ -155,6 +191,21 @@ export async function runCli(args, context = {}) {
 
   // Guard against parser and handler mismatch.
   throw new Error(`Unsupported command: ${command.command}`);
+}
+
+// Render coding workflow events through line output.
+function renderCodingEvent(event, output) {
+  if (event.type === 'task.started') {
+    output(`[started] ${event.task.agent}: ${event.task.title}`);
+    return;
+  }
+
+  if (event.type === 'task.completed') {
+    output(`[completed] ${event.task.agent}: ${event.task.title}`);
+    return;
+  }
+
+  output(`[failed] ${event.task.agent}: ${event.error.message}${event.retry ? ' (retrying)' : ''}`);
 }
 
 // Build the chat service and its dependencies.
