@@ -9,6 +9,7 @@ import { ChatService } from '../services/chatService.js';
 import { createCodingAgentService } from '../services/codingAgentService.js';
 import { createModelConfig } from '../services/modelConfigService.js';
 import { OllamaService } from '../services/ollamaService.js';
+import { createWorkspaceCommandService } from '../services/workspaceCommandService.js';
 import { runSetupWizard } from '../setup/setupWizard.js';
 import { renderDoctorReport } from '../ui/doctor.js';
 import { warningBox } from '../ui/theme.js';
@@ -111,14 +112,7 @@ export async function runCli(args, context = {}) {
     // Build the chat service for persistence and model replies.
     const chatService = createChatService(database, { ...context, modelConfig });
     // Build the terminal chat loop service.
-    const chatLoopService = new ChatLoopService({
-      // Pass the chat service into the loop.
-      chatService,
-      // Pass input stream into the loop.
-      input: context.input,
-      // Pass output stream into the loop.
-      output: context.outputStream,
-    });
+    const chatLoopService = createChatLoopService(chatService, context);
 
     // Ensure a temporary runtime database is closed.
     try {
@@ -145,14 +139,7 @@ export async function runCli(args, context = {}) {
     // Build the chat service for persistence and model replies.
     const chatService = createChatService(database, { ...context, modelConfig });
     // Build the terminal chat loop service.
-    const chatLoopService = new ChatLoopService({
-      // Pass the chat service into the loop.
-      chatService,
-      // Pass input stream into the loop.
-      input: context.input,
-      // Pass output stream into the loop.
-      output: context.outputStream,
-    });
+    const chatLoopService = createChatLoopService(chatService, context);
 
     // Resume the latest chat and handle empty history.
     try {
@@ -206,6 +193,26 @@ function renderCodingEvent(event, output) {
   }
 
   output(`[failed] ${event.task.agent}: ${event.error.message}${event.retry ? ' (retrying)' : ''}`);
+}
+
+// Build the interactive chat loop with workspace tools.
+function createChatLoopService(chatService, context = {}) {
+  const cwd = context.cwd ?? process.cwd();
+  const codingAgentService = context.codingAgentService ?? createCodingAgentService({
+    assistantService: context.assistantService,
+    env: context.env ?? process.env,
+  });
+  const workspaceCommandService = context.workspaceCommandService
+    ?? createWorkspaceCommandService({ cwd });
+
+  return new ChatLoopService({
+    chatService,
+    codingAgentService,
+    workspaceCommandService,
+    cwd,
+    input: context.input,
+    output: context.outputStream,
+  });
 }
 
 // Build the chat service and its dependencies.

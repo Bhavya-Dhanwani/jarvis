@@ -11,15 +11,29 @@ const EXIT_COMMANDS = new Set(['/exit', '/quit']);
 // Run the terminal chat loop.
 export class ChatLoopService {
   // Store chat loop dependencies.
-  constructor({ chatService, input = process.stdin, output = process.stdout, ui = null }) {
+  constructor({
+    chatService,
+    codingAgentService = null,
+    workspaceCommandService = null,
+    cwd = process.cwd(),
+    input = process.stdin,
+    output = process.stdout,
+    ui = null,
+  }) {
     // Store the chat service.
     this.chatService = chatService;
+    // Store optional coding workflow dependency.
+    this.codingAgentService = codingAgentService;
+    // Store optional workspace command dependency.
+    this.workspaceCommandService = workspaceCommandService;
+    // Store the workspace where Jarvis was launched.
+    this.cwd = cwd;
     // Store the input stream.
     this.input = input;
     // Store the output stream.
     this.output = output;
     // Use injected UI or create the default terminal UI.
-    this.ui = ui ?? createTerminalUi({ output });
+    this.ui = ui ?? createTerminalUi({ output, cwd });
   }
 
   // Start reading user input for a chat.
@@ -131,6 +145,24 @@ export class ChatLoopService {
       return false;
     }
 
+    // Run the coding workflow from the active chat.
+    if (message === '/code' || message.startsWith('/code ')) {
+      await this.#runCodingAgent(message.slice('/code'.length).trim());
+      return false;
+    }
+
+    // Run an explicit workspace command.
+    if (message === '/run' || message.startsWith('/run ')) {
+      await this.#runWorkspaceCommand(message.slice('/run'.length).trim());
+      return false;
+    }
+
+    // Push Git only through an explicit slash command.
+    if (message === '/git push' || message.startsWith('/git push ')) {
+      await this.#gitPush(message.slice('/git push'.length).trim());
+      return false;
+    }
+
     // Save and respond to the user message.
     try {
       let streamed = false;
@@ -172,5 +204,60 @@ export class ChatLoopService {
 
     // Keep the chat loop running.
     return false;
+  }
+
+  // Run a coding request through the active workspace.
+  async #runCodingAgent(request) {
+    if (!request) {
+      this.ui.unavailable('coding request is required. Usage: /code <request>');
+      return;
+    }
+
+    if (!this.codingAgentService) {
+      this.ui.unavailable('coding agent is not configured.');
+      return;
+    }
+
+    try {
+      const result = await this.codingAgentService.run(request, {
+        cwd: this.cwd,
+        onEvent: (event) => this.ui.taskEvent?.(event),
+      });
+      const review = result.results.get('review-task');
+
+      await this.ui.assistant(
+        review?.output ?? review?.summary ?? 'Coding workflow completed without a review response.',
+      );
+    } catch (error) {
+      this.ui.unavailable(error.message);
+    }
+  }
+
+  // Run one explicit command in the active workspace.
+  async #runWorkspaceCommand(command) {
+    if (!this.workspaceCommandService) {
+      this.ui.unavailable('workspace commands are not configured.');
+      return;
+    }
+
+    try {
+      const result = await this.workspaceCommandService.run(command);
+      this.ui.commandResult?.(result);
+    } catch (error) {
+      this.ui.unavailable(error.message);
+    }
+  }
+
+  // Push the current workspace through Git.
+  async #gitPush(value) {
+    if (!this.workspaceCommandService) {
+      this.ui.unavailable('Git commands are not configured.');
+      return;
+    }
+
+    const args = value ? value.split(/\s+/) : [];
+    const result = await this.workspaceCommandService.gitPush(args);
+
+    this.ui.commandResult?.(result);
   }
 }

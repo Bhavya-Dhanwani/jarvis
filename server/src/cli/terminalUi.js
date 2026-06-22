@@ -27,6 +27,9 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       output.write(statusLine('info', 'Workspace', cwd));
       output.write(statusLine('info', 'Git branch', branch));
       output.write(card('COMMANDS', [
+        ['/code <request>', 'Run coding agents in this workspace'],
+        ['/run <command>', 'Run a command in this workspace'],
+        ['/git push [args]', 'Push the current Git branch'],
         ['/exit', 'Save and close session'],
         ['/quit', 'Save and close session'],
       ], { borderColor: mode === 'resume' ? 'magenta' : 'cyan' }));
@@ -64,6 +67,34 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
 
     sessionSaved() {
       output.write(successBox('Session saved. Memory thread preserved.'));
+    },
+
+    taskEvent(event) {
+      if (event.type === 'task.started') {
+        output.write(statusLine('info', event.task.agent, event.task.title));
+        return;
+      }
+
+      if (event.type === 'task.completed') {
+        output.write(statusLine('success', event.task.agent, event.task.title));
+        return;
+      }
+
+      output.write(statusLine('warning', event.task.agent, event.error.message));
+    },
+
+    commandResult(result) {
+      const content = [result.stdout, result.stderr].filter(Boolean).join('\n');
+
+      if (content) {
+        output.write(`${content}\n`);
+      }
+
+      output.write(statusLine(
+        result.status === 'completed' ? 'success' : 'warning',
+        result.status === 'completed' ? 'Command completed' : 'Command failed',
+        `exit ${result.exitCode}`,
+      ));
     },
 
     async assistant(message) {
