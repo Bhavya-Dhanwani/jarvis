@@ -14,6 +14,7 @@ export class ChatLoopService {
   constructor({
     chatService,
     codingAgentService = null,
+    codingIntentService = codingAgentService?.intentService ?? null,
     workspaceCommandService = null,
     cwd = process.cwd(),
     input = process.stdin,
@@ -24,6 +25,8 @@ export class ChatLoopService {
     this.chatService = chatService;
     // Store optional coding workflow dependency.
     this.codingAgentService = codingAgentService;
+    // Store optional model-driven intent router.
+    this.codingIntentService = codingIntentService;
     // Store optional workspace command dependency.
     this.workspaceCommandService = workspaceCommandService;
     // Store the workspace where Jarvis was launched.
@@ -147,7 +150,7 @@ export class ChatLoopService {
 
     // Run the coding workflow from the active chat.
     if (message === '/code' || message.startsWith('/code ')) {
-      await this.#runCodingAgent(message.slice('/code'.length).trim());
+      await this.#runCodingAgent(message.slice('/code'.length).trim(), { chatId });
       return false;
     }
 
@@ -160,6 +163,12 @@ export class ChatLoopService {
     // Push Git only through an explicit slash command.
     if (message === '/git push' || message.startsWith('/git push ')) {
       await this.#gitPush(message.slice('/git push'.length).trim());
+      return false;
+    }
+
+    // Let the model route workspace-changing prompts into coding mode.
+    if (await this.#shouldRunCodingAgent(message)) {
+      await this.#runCodingAgent(message, { chatId });
       return false;
     }
 
@@ -207,7 +216,7 @@ export class ChatLoopService {
   }
 
   // Run a coding request through the active workspace.
-  async #runCodingAgent(request) {
+  async #runCodingAgent(request, { chatId = null } = {}) {
     if (!request) {
       this.ui.unavailable('coding request is required. Usage: /code <request>');
       return;
@@ -219,18 +228,40 @@ export class ChatLoopService {
     }
 
     try {
+      if (chatId) {
+        this.chatService.saveUserMessage(chatId, request);
+      }
+
       const result = await this.codingAgentService.run(request, {
         cwd: this.cwd,
         onEvent: (event) => this.ui.taskEvent?.(event),
       });
       const review = result.results.get('review-task');
+      const response = review?.output
+        ?? review?.summary
+        ?? 'Coding workflow completed without a review response.';
 
-      await this.ui.assistant(
-        review?.output ?? review?.summary ?? 'Coding workflow completed without a review response.',
-      );
+      if (chatId) {
+        this.chatService.saveAssistantMessage(chatId, response);
+      }
+
+      await this.ui.assistant(response);
     } catch (error) {
       this.ui.unavailable(error.message);
     }
+  }
+
+  // Ask the configured model whether the prompt requires coding work.
+  async #shouldRunCodingAgent(message) {
+    if (!this.codingIntentService || !this.codingAgentService) {
+      return false;
+    }
+
+    const decision = await this.codingIntentService.classify(message, {
+      cwd: this.cwd,
+    });
+
+    return decision.intent === 'code';
   }
 
   // Run one explicit command in the active workspace.

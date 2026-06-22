@@ -11,10 +11,16 @@ cd path/to/project
 jarvis
 ```
 
-Inside the chat:
+Describe coding work normally and Jarvis will use the model to decide when the coding-agent workflow is needed:
 
 ```txt
-/code <request>       Run the coding-agent workflow in the current folder
+Fix the API route and add a regression test
+```
+
+Explicit commands remain available:
+
+```txt
+/code <request>       Force the coding-agent workflow in the current folder
 /run <command>        Run a command in the current folder
 /git push [args]      Push the current Git branch
 /exit                 Save and close the session

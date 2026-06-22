@@ -1,0 +1,87 @@
+// Decide whether a chat message should enter the coding workflow.
+export class CodingIntentService {
+  // Store the existing assistant service.
+  constructor({ assistantService }) {
+    // Reuse the configured model instead of creating another provider.
+    this.assistantService = assistantService;
+  }
+
+  // Classify one user message as chat or code.
+  async classify(message, { cwd = process.cwd() } = {}) {
+    if (!this.assistantService || isSimpleConversation(message)) {
+      return {
+        intent: 'chat',
+        reason: 'Simple conversation does not require workspace work.',
+      };
+    }
+
+    try {
+      const reply = await this.assistantService.generateReply([
+        {
+          role: 'system',
+          content: 'Classify the user request for Jarvis. Choose "code" only when the user asks to inspect, create, modify, debug, test, or implement files in the current workspace. Choose "chat" for explanations, questions, brainstorming, and ordinary conversation that do not request workspace changes. Return only JSON: {"intent":"code"|"chat","reason":"short reason"}. Never choose command execution or Git push.',
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            message,
+            workspace: cwd,
+          }),
+        },
+      ]);
+
+      return parseIntent(reply);
+    } catch {
+      return {
+        intent: 'chat',
+        reason: 'Intent classification was unavailable.',
+      };
+    }
+  }
+}
+
+// Create the coding intent service.
+export function createCodingIntentService(options) {
+  return new CodingIntentService(options);
+}
+
+// Parse the model response without trusting surrounding prose.
+function parseIntent(reply) {
+  const text = String(reply ?? '').trim();
+  const json = text.match(/\{[\s\S]*\}/)?.[0];
+
+  if (!json) {
+    return {
+      intent: 'chat',
+      reason: 'Intent response was not valid JSON.',
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(json);
+
+    if (parsed.intent !== 'code') {
+      return {
+        intent: 'chat',
+        reason: String(parsed.reason ?? 'The request does not require workspace changes.'),
+      };
+    }
+
+    return {
+      intent: 'code',
+      reason: String(parsed.reason ?? 'The request requires workspace changes.'),
+    };
+  } catch {
+    return {
+      intent: 'chat',
+      reason: 'Intent response was not valid JSON.',
+    };
+  }
+}
+
+// Keep tiny social turns on the existing local fast path.
+function isSimpleConversation(message) {
+  return /^(hi|hii|hello|hey|yo|thanks|thank you|ok|okay|nice|cool)[\s!.?]*$/i.test(
+    String(message ?? '').trim(),
+  );
+}

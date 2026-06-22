@@ -1,5 +1,7 @@
-// Import agent workflow.
+// Import planner workflow.
 import { createAgentWorkflow } from '../core/agentWorkflow.js';
+// Import model-driven coding intent router.
+import { createCodingIntentService } from './codingIntentService.js';
 // Import model configuration.
 import { createModelConfig } from './modelConfigService.js';
 // Import Ollama service.
@@ -30,11 +32,16 @@ export class CodingAgentService {
     assistantService = null,
     modelConfig = null,
     workflow = null,
+    intentService = null,
     env = process.env,
   } = {}) {
     // Reuse the existing model configuration and Ollama service.
     this.modelConfig = modelConfig ?? createModelConfig({ env });
     this.assistantService = assistantService ?? new OllamaService(this.modelConfig);
+    // Reuse the same model for automatic chat routing.
+    this.intentService = intentService ?? createCodingIntentService({
+      assistantService: this.assistantService,
+    });
     // Use an injected workflow for tests or build the model-backed workflow.
     this.workflow = workflow ?? createAgentWorkflow({
       workerPool: createModelWorkerPool(this.assistantService),
