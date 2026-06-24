@@ -20,6 +20,7 @@ Fix the API route and add a regression test
 Explicit commands remain available:
 
 ```txt
+/commands             Show all commands available in the chat
 /code <request>       Force the coding-agent workflow in the current folder
 /run <command>        Run a command in the current folder
 /git push [args]      Push the current Git branch
@@ -31,3 +32,5 @@ You can also run one coding request without entering chat:
 ```bash
 jarvis code "build a frontend page with a backend API"
 ```
+
+Use `jarvis commands` to print the same command list without opening a session.

@@ -6,14 +6,21 @@ import { NoChatSessionError } from '../core/errors.js';
 import { getSystemReport } from '../core/systemCheck.js';
 import { ChatLoopService } from '../services/chatLoopService.js';
 import { ChatService } from '../services/chatService.js';
-import { createCodingAgentService } from '../services/codingAgentService.js';
+import {
+  createCodingAgentService,
+  getCodingWorkflowResponse,
+} from '../services/codingAgentService.js';
 import { createModelConfig } from '../services/modelConfigService.js';
+import {
+  ensureOllamaReady,
+  formatOllamaSetupRequired,
+} from '../services/ollamaStartupService.js';
 import { OllamaService } from '../services/ollamaService.js';
 import { createWorkspaceCommandService } from '../services/workspaceCommandService.js';
 import { runSetupWizard } from '../setup/setupWizard.js';
 import { renderDoctorReport } from '../ui/doctor.js';
 import { warningBox } from '../ui/theme.js';
-import { printHelp, printVersion } from './commands.js';
+import { printCommands, printHelp, printVersion } from './commands.js';
 import { parseCommand } from './parser.js';
 
 export async function runCli(args, context = {}) {
@@ -36,6 +43,12 @@ export async function runCli(args, context = {}) {
     printVersion(packageInfo, output);
     // Return a successful status.
     return { status: 'ok' };
+  }
+
+  // Show commands available in an interactive Jarvis session.
+  if (command.command === 'commands') {
+    printCommands(output);
+    return { status: 'ok', command: 'commands' };
   }
 
   // Handle doctor command.
@@ -83,17 +96,21 @@ export async function runCli(args, context = {}) {
       assistantService: context.assistantService,
       env: context.env ?? process.env,
     });
+    const modelConfig = createModelConfig({ env: context.env ?? process.env });
+    const readiness = await checkOllamaReadiness(modelConfig, context);
+
+    if (!readiness.ready) {
+      output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
+      return { status: 'setup-required', command: 'code', readiness };
+    }
 
     // Run the planner, workers, and review pipeline.
     const result = await codingAgentService.run(request, {
       cwd: context.cwd ?? process.cwd(),
       onEvent: (event) => renderCodingEvent(event, output),
     });
-    // Load the final review result.
-    const review = result.results.get('review-task');
-
-    // Print the reviewed response after task progress.
-    output(review?.output ?? review?.summary ?? 'Coding workflow completed without a review response.');
+    // Print the reviewed response or surface the task that actually failed.
+    output(getCodingWorkflowResponse(result));
 
     // Return command details for callers and tests.
     return {
@@ -109,6 +126,13 @@ export async function runCli(args, context = {}) {
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
     const modelConfig = createModelConfig({ env: context.env ?? process.env });
+    const readiness = await checkOllamaReadiness(modelConfig, context);
+
+    if (!readiness.ready) {
+      output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
+      return { status: 'setup-required', command: 'new', readiness };
+    }
+
     // Build the chat service for persistence and model replies.
     const chatService = createChatService(database, { ...context, modelConfig });
     // Build the terminal chat loop service.
@@ -136,6 +160,13 @@ export async function runCli(args, context = {}) {
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
     const modelConfig = createModelConfig({ env: context.env ?? process.env });
+    const readiness = await checkOllamaReadiness(modelConfig, context);
+
+    if (!readiness.ready) {
+      output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
+      return { status: 'setup-required', command: 'resume', readiness };
+    }
+
     // Build the chat service for persistence and model replies.
     const chatService = createChatService(database, { ...context, modelConfig });
     // Build the terminal chat loop service.
@@ -180,19 +211,75 @@ export async function runCli(args, context = {}) {
   throw new Error(`Unsupported command: ${command.command}`);
 }
 
+async function checkOllamaReadiness(modelConfig, context = {}) {
+  if (context.skipOllamaStartupCheck === true
+    || context.assistantService
+    || context.codingAgentService) {
+    return { ready: true, skipped: true };
+  }
+
+  const checker = context.ensureOllamaReady ?? ensureOllamaReady;
+
+  return checker({
+    modelConfig,
+    ...(context.ollamaStartupOptions ?? {}),
+  });
+}
+
 // Render coding workflow events through line output.
 function renderCodingEvent(event, output) {
+  if (event.type === 'workflow.planned') {
+    output('');
+    output(`[plan] ${event.tasks.map((task) => `${task.agent}: ${task.title}`).join(' -> ')}`);
+    return;
+  }
+
+  if (event.type === 'tool.started') {
+    output(`  [tool] ${event.task.agent}: ${event.tool}${event.args?.path ? ` (${event.args.path})` : ''}`);
+    return;
+  }
+
+  if (event.type === 'tool.completed') {
+    output(`  [tool completed] ${event.task.agent}: ${event.tool}${event.result ? ` - ${event.result}` : ''}`);
+    return;
+  }
+
+  if (event.type === 'tool.failed') {
+    output(`  [tool failed] ${event.task.agent}: ${event.tool}: ${event.error.message}`);
+    return;
+  }
+
   if (event.type === 'task.started') {
+    output('');
     output(`[started] ${event.task.agent}: ${event.task.title}`);
     return;
   }
 
   if (event.type === 'task.completed') {
     output(`[completed] ${event.task.agent}: ${event.task.title}`);
+    const detail = String(event.result?.output ?? event.result?.summary ?? '').trim();
+    if (detail) {
+      output(`  ${detail}`);
+    }
     return;
   }
 
-  output(`[failed] ${event.task.agent}: ${event.error.message}${event.retry ? ' (retrying)' : ''}`);
+  if (event.type === 'quality.pass.started') {
+    output(`[quality] pass ${event.pass} started`);
+    return;
+  }
+
+  if (event.type === 'quality.pass.completed') {
+    output(`[quality] pass ${event.pass} completed`);
+    return;
+  }
+
+  if (event.type === 'quality.rework.requested') {
+    output(`[quality] rework requested after pass ${event.pass}`);
+    return;
+  }
+
+  output(`[event] ${event.type ?? 'unknown'}${event.error?.message ? `: ${event.error.message}` : ''}`);
 }
 
 // Build the interactive chat loop with workspace tools.

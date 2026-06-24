@@ -69,6 +69,7 @@ test('Jarvis chat runs coding, command, and Git push actions in the active works
       database,
       cwd: workspace,
       input: Readable.from([
+        '/commands\n',
         '/code build the API\n',
         '/run npm test\n',
         '/git push origin main\n',
@@ -100,6 +101,7 @@ test('Jarvis chat runs coding, command, and Git push actions in the active works
         args: ['origin', 'main'],
       },
     ]);
+    assert.match(output.text(), /JARVIS COMMANDS/);
     assert.match(output.text(), /Coding work reviewed/);
     assert.match(output.text(), /tests passed/);
     assert.match(output.text(), /pushed/);

@@ -39,10 +39,12 @@ export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
     },
     // Keep the model loaded according to the detected system profile.
     keepAlive: env.JARVIS_OLLAMA_KEEP_ALIVE ?? tuning.keepAlive,
+    // Warm-up should release quickly; real prompts still use keepAlive above.
+    warmKeepAlive: env.JARVIS_OLLAMA_WARM_KEEP_ALIVE ?? '30s',
     // Allow long answers to keep streaming through several bounded requests.
     maxAutoContinuations: Number(env.JARVIS_OLLAMA_MAX_CONTINUATIONS ?? tuning.maxAutoContinuations),
-    // Startup warm-up is opt-in because loading a model can destabilize some systems.
-    warmOnStart: isEnabled(env.JARVIS_OLLAMA_WARMUP),
+    // Use gentle background warm-up by default; set JARVIS_OLLAMA_WARMUP=false to disable.
+    warmOnStart: !isDisabled(env.JARVIS_OLLAMA_WARMUP),
     // Expose where the active model came from for diagnostics.
     source: savedConfig?.source ?? (env.JARVIS_OLLAMA_MODEL ? 'env' : 'recommendation'),
   };
@@ -85,9 +87,9 @@ function getRuntimeTuning(recommendation) {
   };
 }
 
-// Parse common truthy environment values.
-function isEnabled(value) {
-  return /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
+// Parse common falsey environment values.
+function isDisabled(value) {
+  return /^(0|false|no|off)$/i.test(String(value ?? '').trim());
 }
 
 // Load the setup-selected model from disk.

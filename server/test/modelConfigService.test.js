@@ -53,22 +53,22 @@ test('model config uses environment model when no saved setup config exists', ()
   assert.equal(config.source, 'env');
 });
 
-// Verify startup warm-up stays disabled unless explicitly requested.
-test('model config keeps startup warm-up opt-in', () => {
+// Verify startup warm-up is enabled by default and can still be disabled.
+test('model config uses gentle startup warm-up unless explicitly disabled', () => {
   const defaultConfig = createModelConfig({
     totalMemoryGb: 16,
     env: missingConfigEnv(),
   });
-  const enabledConfig = createModelConfig({
+  const disabledConfig = createModelConfig({
     totalMemoryGb: 16,
     env: {
       ...missingConfigEnv(),
-      JARVIS_OLLAMA_WARMUP: 'true',
+      JARVIS_OLLAMA_WARMUP: 'false',
     },
   });
 
-  assert.equal(defaultConfig.warmOnStart, false);
-  assert.equal(enabledConfig.warmOnStart, true);
+  assert.equal(defaultConfig.warmOnStart, true);
+  assert.equal(disabledConfig.warmOnStart, false);
 });
 
 // Verify generation settings adapt to the detected memory profile.

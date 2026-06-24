@@ -137,3 +137,232 @@ test('ollama service streams automatic continuations', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+// Verify blank model generations are marked as safe to retry.
+test('ollama service marks empty responses as transient', async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+
+  globalThis.fetch = async () => {
+    requests += 1;
+    return new Response(JSON.stringify({
+    message: {
+      content: '',
+    },
+    done: true,
+    done_reason: 'stop',
+  }), {
+      headers: {
+        'content-type': 'application/json',
+      },
+    });
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    await assert.rejects(
+      () => service.generateReply([
+        { role: 'user', content: 'write an html page' },
+      ]),
+      (error) => error.message === 'Ollama returned an empty response after retrying.'
+        && error.transient === true
+        && error.code === 'OLLAMA_EMPTY_RESPONSE',
+    );
+    assert.equal(requests, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+// Verify a one-off empty response is retried before surfacing an error.
+test('ollama service retries empty non-streaming responses', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+
+  globalThis.fetch = async (_url, init) => {
+    requestBodies.push(JSON.parse(init.body));
+
+    if (requestBodies.length === 1) {
+      return new Response(JSON.stringify({
+        message: { content: '' },
+        done: true,
+        done_reason: 'stop',
+      }));
+    }
+
+    return new Response(JSON.stringify({
+      message: { content: 'Recovered reply.' },
+      done: true,
+      done_reason: 'stop',
+    }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    const reply = await service.generateReply([
+      { role: 'user', content: 'write an html page' },
+    ]);
+
+    assert.equal(reply, 'Recovered reply.');
+    assert.equal(requestBodies.length, 2);
+    assert.match(requestBodies[1].messages.at(-1).content, /previous response was empty/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify Ollama native tool calls can have empty content and survive the recall round trip.
+test('ollama service sends tools and preserves tool-call context', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+
+  globalThis.fetch = async (_url, init) => {
+    requestBodies.push(JSON.parse(init.body));
+
+    if (requestBodies.length === 1) {
+      return new Response(JSON.stringify({
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            function: {
+              name: 'read_file',
+              arguments: { path: 'index.html' },
+            },
+          }],
+        },
+        done: true,
+      }));
+    }
+
+    return new Response(JSON.stringify({
+      message: { role: 'assistant', content: 'File inspected.' },
+      done: true,
+    }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+    const tools = [{
+      type: 'function',
+      function: {
+        name: 'read_file',
+        description: 'Read a file.',
+        parameters: { type: 'object', properties: {} },
+      },
+    }];
+    const first = await service.generateToolTurn([
+      { role: 'user', content: 'inspect index.html' },
+    ], { tools });
+    const second = await service.generateToolTurn([
+      { role: 'user', content: 'inspect index.html' },
+      first,
+      { role: 'tool', tool_name: 'read_file', content: '<html></html>' },
+    ], { tools });
+
+    assert.equal(first.tool_calls[0].function.name, 'read_file');
+    assert.equal(second.content, 'File inspected.');
+    assert.deepEqual(requestBodies[0].tools, tools);
+    assert.equal(requestBodies[1].messages.at(-2).tool_calls[0].function.name, 'read_file');
+    assert.equal(requestBodies[1].messages.at(-1).tool_name, 'read_file');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+// Coalesce simultaneous warm-up calls into one Ollama model load.
+test('ollama service warms a model only once concurrently', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+  let requests = 0;
+
+  globalThis.fetch = async (_url, init) => {
+    requests += 1;
+    requestBodies.push(JSON.parse(init.body));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return new Response('{"done":true}\n');
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      keepAlive: '5m',
+      options: { num_ctx: 4096, num_batch: 512, num_predict: 64 },
+    });
+
+    await Promise.all([service.warmUp(), service.warmUp(), service.warmUp()]);
+    await service.warmUp();
+
+    assert.equal(requests, 1);
+    assert.equal(requestBodies[0].keep_alive, '30s');
+    assert.equal(requestBodies[0].options.num_ctx, 1024);
+    assert.equal(requestBodies[0].options.num_batch, 32);
+    assert.equal(requestBodies[0].options.num_predict, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Reuse an in-flight background warm-up instead of sending a concurrent prompt load.
+test('ollama service waits for background warm-up before model requests', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  let releaseWarmup;
+
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(init.body) });
+
+    if (String(url).endsWith('/api/generate')) {
+      await new Promise((resolve) => {
+        releaseWarmup = resolve;
+      });
+      return new Response('{"done":true}\n');
+    }
+
+    return new Response(JSON.stringify({
+      message: { content: 'Ready.' },
+      done: true,
+      done_reason: 'stop',
+    }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    const warmup = service.warmUp();
+    const reply = service.generateReply([
+      { role: 'user', content: 'tell me something useful' },
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /\/api\/generate$/);
+
+    releaseWarmup();
+
+    assert.equal(await reply, 'Ready.');
+    await warmup;
+    assert.equal(requests.length, 2);
+    assert.match(requests[1].url, /\/api\/chat$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+

@@ -120,6 +120,24 @@ test('CLI creates a chat, persists messages, and resumes the active chat', async
   }
 });
 
+// Verify startup readiness sends users to setup before opening chat.
+test('CLI asks for setup when Ollama or the model is not ready', async () => {
+  const output = createOutputCapture();
+  const result = await runCli([], {
+    input: Readable.from(['/exit\n']),
+    outputStream: output.stream,
+    output: output.writeLine,
+    ensureOllamaReady: async () => ({
+      ready: false,
+      reason: 'Configured Ollama model is not installed: gemma4:e2b',
+    }),
+  });
+
+  assert.equal(result.status, 'setup-required');
+  assert.match(output.text(), /jarvis setup/);
+  assert.match(output.text(), /gemma4:e2b/);
+});
+
 // Create a writable stream that records all output.
 function createOutputCapture() {
   // Store output chunks in memory.

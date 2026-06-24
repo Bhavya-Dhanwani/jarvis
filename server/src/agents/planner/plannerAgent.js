@@ -15,7 +15,18 @@ const DEFAULT_AGENT_RULES = [
   },
   {
     agent: 'frontend',
-    patterns: [/\bui\b/i, /\bfrontend\b/i, /\bpage\b/i, /\bcomponent\b/i],
+    patterns: [
+      /\bui\b/i,
+      /\bfrontend\b/i,
+      /\bpage\b/i,
+      /\bcomponent\b/i,
+      /\bhtml\b/i,
+      /\bcss\b/i,
+      /\b(?:java|type)script\b/i,
+      /\bjs\b/i,
+      /\bchat interface\b/i,
+      /\bwebsite\b/i,
+    ],
     title: 'Plan frontend changes',
   },
 ];
@@ -31,27 +42,50 @@ export class PlannerAgent {
   // Create a task graph for a request.
   plan(request) {
     const selectedRules = this.#selectRules(request);
+    const planningTask = {
+      id: 'planning-task',
+      title: 'Plan implementation workflow',
+      agent: 'planner',
+      dependencies: [],
+      input: { request },
+    };
+    const prdTask = {
+      id: 'prd-task',
+      title: 'Define implementation requirements',
+      agent: 'prd',
+      dependencies: [planningTask.id],
+      input: { request },
+    };
     const implementationTasks = selectedRules.map((rule) => ({
       id: `${rule.agent}-task`,
       title: rule.title,
       agent: rule.agent,
-      dependencies: [],
+      dependencies: [prdTask.id],
       input: {
         request,
       },
     }));
 
-    const reviewTask = {
-      id: 'review-task',
-      title: 'Review completed work',
-      agent: 'review',
+    const testingTask = {
+      id: 'testing-task',
+      title: 'Test completed implementation',
+      agent: 'testing',
       dependencies: implementationTasks.map((task) => task.id),
       input: {
         request,
       },
     };
+    const reviewTask = {
+      id: 'review-task',
+      title: 'Review completed work',
+      agent: 'review',
+      dependencies: [testingTask.id],
+      input: {
+        request,
+      },
+    };
 
-    return createTaskGraph([...implementationTasks, reviewTask]);
+    return createTaskGraph([planningTask, prdTask, ...implementationTasks, testingTask, reviewTask]);
   }
 
   // Select matching agent rules for a request.
@@ -73,3 +107,4 @@ export class PlannerAgent {
 export function createPlannerAgent(options) {
   return new PlannerAgent(options);
 }
+

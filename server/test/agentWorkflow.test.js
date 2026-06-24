@@ -142,10 +142,20 @@ test('agent workflow plans, schedules, executes workers, and reviews', async () 
   const result = await workflow.run('build a frontend page with a backend api and database schema');
 
   assert.equal(result.status, 'completed');
-  assert.equal(result.tasks.length, 4);
+  assert.equal(result.tasks.length, 7);
+  assert.equal(result.results.has('planning-task'), true);
+  assert.equal(result.results.has('prd-task'), true);
   assert.equal(result.results.has('frontend-task'), true);
   assert.equal(result.results.has('backend-task'), true);
   assert.equal(result.results.has('database-task'), true);
+  assert.equal(result.results.has('testing-task'), true);
+  const tasks = new Map(result.tasks.map((task) => [task.id, task]));
+  assert.deepEqual(tasks.get('prd-task').dependencies, ['planning-task']);
+  assert.deepEqual(tasks.get('frontend-task').dependencies, ['prd-task']);
+  assert.deepEqual(tasks.get('backend-task').dependencies, ['prd-task']);
+  assert.deepEqual(tasks.get('database-task').dependencies, ['prd-task']);
+  assert.deepEqual(tasks.get('testing-task').dependencies.sort(), ['backend-task', 'database-task', 'frontend-task']);
+  assert.deepEqual(tasks.get('review-task').dependencies, ['testing-task']);
   assert.equal(result.results.get('review-task').agent, 'review');
 });
 
@@ -163,3 +173,4 @@ function wait() {
     setTimeout(resolve, 0);
   });
 }
+

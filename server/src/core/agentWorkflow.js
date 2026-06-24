@@ -24,6 +24,7 @@ export class AgentWorkflow {
   // Run a request through the agent workflow.
   async run(request, context = {}) {
     const taskGraph = this.planner.plan(request);
+    context.onEvent?.({ type: 'workflow.planned', tasks: taskGraph.listTasks() });
     const results = new Map();
     const runContext = {
       ...context,
@@ -49,4 +50,3 @@ export class AgentWorkflow {
 export function createAgentWorkflow(options) {
   return new AgentWorkflow(options);
 }
-

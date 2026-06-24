@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { playChatSequence, typewriter } from '../ui/ascii.js';
 import { card, divider, section, statusLine, successBox, theme, warningBox } from '../ui/theme.js';
 import { loading, withSpinner } from '../ui/spinner.js';
+import { CHAT_COMMANDS } from './commands.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,14 +27,8 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       output.write(statusLine('info', 'Ollama model', modelConfig?.model ?? 'not configured'));
       output.write(statusLine('info', 'Workspace', cwd));
       output.write(statusLine('info', 'Git branch', branch));
-      output.write(card('COMMANDS', [
-        ['/code <request>', 'Run coding agents in this workspace'],
-        ['/run <command>', 'Run a command in this workspace'],
-        ['/git push [args]', 'Push the current Git branch'],
-        ['/exit', 'Save and close session'],
-        ['/quit', 'Save and close session'],
-      ], { borderColor: mode === 'resume' ? 'magenta' : 'cyan' }));
       output.write('\n');
+      output.write(statusLine('info', 'Commands', 'type /commands to view'));
       output.write(divider());
     },
 
@@ -69,18 +64,69 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       output.write(successBox('Session saved. Memory thread preserved.'));
     },
 
+    commands() {
+      output.write(`\n${card('JARVIS COMMANDS', CHAT_COMMANDS)}\n`);
+    },
+
     taskEvent(event) {
+      if (event.type === 'workflow.planned') {
+        output.write('\n');
+        output.write(card('IMPLEMENTATION PLAN', event.tasks.map((task, index) => [
+          `${index + 1}. ${task.agent}`,
+          task.title,
+        ]), { borderColor: 'magenta' }));
+        output.write('\n');
+        return;
+      }
+
+      if (event.type === 'tool.started') {
+        output.write(`  ${statusLine('info', `${event.task.agent} tool`, `${event.tool} ${formatToolTarget(event.args)}`.trim())}`);
+        return;
+      }
+
+      if (event.type === 'tool.completed') {
+        output.write(`  ${statusLine('success', `${event.task.agent} tool`, event.result ?? event.tool)}`);
+        return;
+      }
+
+      if (event.type === 'tool.failed') {
+        output.write(`  ${statusLine('warning', `${event.task.agent} tool`, `${event.tool}: ${event.error.message}`)}`);
+        return;
+      }
+
       if (event.type === 'task.started') {
+        output.write('\n');
         output.write(statusLine('info', event.task.agent, event.task.title));
         return;
       }
 
       if (event.type === 'task.completed') {
         output.write(statusLine('success', event.task.agent, event.task.title));
+        const detail = String(event.result?.output ?? event.result?.summary ?? '').trim();
+        if (detail) {
+          output.write(`${theme.muted(indent(detail))}\n`);
+        }
         return;
       }
 
-      output.write(statusLine('warning', event.task.agent, event.error.message));
+      if (event.type === 'quality.pass.started') {
+        output.write(statusLine('info', 'quality pass', `pass ${event.pass}`));
+        return;
+      }
+
+      if (event.type === 'quality.pass.completed') {
+        output.write(statusLine('success', 'quality pass', `pass ${event.pass}`));
+        return;
+      }
+
+      if (event.type === 'quality.rework.requested') {
+        output.write(statusLine('warning', 'quality pass', `rework requested after pass ${event.pass}`));
+        return;
+      }
+
+      const label = event.task?.agent ?? event.type ?? 'event';
+      const detail = event.error?.message ?? event.message ?? '';
+      output.write(statusLine('warning', label, detail));
     },
 
     commandResult(result) {
@@ -126,3 +172,11 @@ async function getGitBranch(cwd) {
     return 'no-git';
   }
 }
+
+function formatToolTarget(args = {}) {
+  return args.path ? `(${args.path})` : '';
+}
+function indent(value) {
+  return value.split('\n').map((line) => `    ${line}`).join('\n');
+}
+

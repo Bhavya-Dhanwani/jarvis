@@ -2,6 +2,8 @@
 import { createInterface } from 'node:readline/promises';
 // Import model config for header display.
 import { createModelConfig } from './modelConfigService.js';
+// Import coding workflow result validation.
+import { getCodingWorkflowResponse } from './codingAgentService.js';
 // Import terminal UI renderer.
 import { createTerminalUi } from '../cli/terminalUi.js';
 
@@ -88,7 +90,7 @@ export class ChatLoopService {
       }
 
       if (options.modelConfig?.warmOnStart === true) {
-        await this.#warmAssistant();
+        this.#startBackgroundWarmAssistant();
       }
 
       // Keep prompting forever in interactive mode.
@@ -120,13 +122,11 @@ export class ChatLoopService {
     }
   }
 
-  // Warm the local model before the first interactive prompt.
-  async #warmAssistant() {
-    try {
-      await this.ui.warming?.(() => this.chatService.warmAssistant());
-    } catch (error) {
+  // Warm the local model without blocking the prompt.
+  #startBackgroundWarmAssistant() {
+    this.chatService.warmAssistant().catch((error) => {
       this.ui.unavailable(`model warm-up skipped: ${error.message}`);
-    }
+    });
   }
 
   // Handle one user input line.
@@ -145,6 +145,12 @@ export class ChatLoopService {
     // Ignore empty lines.
     if (!message) {
       // Keep the chat loop running.
+      return false;
+    }
+
+    // Keep the command list out of the startup header until requested.
+    if (message === '/commands') {
+      this.ui.commands?.();
       return false;
     }
 
@@ -236,10 +242,7 @@ export class ChatLoopService {
         cwd: this.cwd,
         onEvent: (event) => this.ui.taskEvent?.(event),
       });
-      const review = result.results.get('review-task');
-      const response = review?.output
-        ?? review?.summary
-        ?? 'Coding workflow completed without a review response.';
+      const response = getCodingWorkflowResponse(result);
 
       if (chatId) {
         this.chatService.saveAssistantMessage(chatId, response);

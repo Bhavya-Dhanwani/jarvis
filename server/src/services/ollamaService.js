@@ -1,5 +1,6 @@
 // Service for sending chat messages to Ollama.
 const DEFAULT_MAX_AUTO_CONTINUATIONS = 12;
+const DEFAULT_EMPTY_RESPONSE_RETRIES = 2;
 
 export class OllamaService {
   // Store model configuration.
@@ -8,6 +9,25 @@ export class OllamaService {
     this.config = config;
     // Track whether this process has already asked Ollama to load the model.
     this.warmed = false;
+    this.warmPromise = null;
+  }
+
+  // Generate one non-streaming assistant turn that may contain native tool calls.
+  async generateToolTurn(messages, { tools = [] } = {}) {
+    await this.#waitForBackgroundWarmUp();
+
+    const options = createRequestOptions(this.config.options, messages);
+    const result = await sendChatRequestWithEmptyRetry({
+      host: this.config.host,
+      model: this.config.model,
+      keepAlive: this.config.keepAlive,
+      messages: createRequestMessages(messages),
+      options,
+      tools,
+      allowToolCalls: true,
+    }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
+
+    return result.message;
   }
 
   // Ask Ollama to load the model before the first user message.
@@ -16,6 +36,21 @@ export class OllamaService {
       return;
     }
 
+    if (this.warmPromise) {
+      return this.warmPromise;
+    }
+
+    this.warmPromise = this.#loadModel();
+
+    try {
+      await this.warmPromise;
+      this.warmed = true;
+    } finally {
+      this.warmPromise = null;
+    }
+  }
+
+  async #loadModel() {
     const response = await fetch(`${this.config.host}/api/generate`, {
       method: 'POST',
       headers: {
@@ -25,11 +60,8 @@ export class OllamaService {
         model: this.config.model,
         prompt: '',
         stream: true,
-        keep_alive: this.config.keepAlive ?? '2m',
-        options: {
-          ...stripJarvisOnlyOptions(this.config.options ?? {}),
-          num_predict: 1,
-        },
+        keep_alive: this.config.warmKeepAlive ?? '30s',
+        options: createWarmUpOptions(this.config.options ?? {}),
       }),
     }).catch((error) => {
       throw new Error(`Could not warm Ollama at ${this.config.host}: ${error.message}`);
@@ -41,11 +73,22 @@ export class OllamaService {
     }
 
     await drainResponse(response);
-    this.warmed = true;
+  }
+
+  async #waitForBackgroundWarmUp() {
+    if (!this.warmPromise) {
+      return;
+    }
+
+    try {
+      await this.warmPromise;
+    } catch {
+      // The real prompt should get its own chance to report the current Ollama state.
+    }
   }
 
   // Generate an assistant reply from chat history.
-  async generateReply(messages, { onToken = null } = {}) {
+  async generateReply(messages, { onToken = null, generationOptions = {}, maxContinuations = null } = {}) {
     const localReply = createLocalFastReply(messages);
 
     if (localReply) {
@@ -56,20 +99,27 @@ export class OllamaService {
       return localReply;
     }
 
-    const options = createRequestOptions(this.config.options, messages);
+    await this.#waitForBackgroundWarmUp();
+
+    const options = {
+      ...createRequestOptions(this.config.options, messages),
+      ...generationOptions,
+    };
     let requestMessages = createRequestMessages(messages);
     let reply = '';
-    const maxContinuations = Number(this.config.maxAutoContinuations ?? DEFAULT_MAX_AUTO_CONTINUATIONS);
+    const continuationLimit = Number(maxContinuations
+      ?? this.config.maxAutoContinuations
+      ?? DEFAULT_MAX_AUTO_CONTINUATIONS);
 
-    for (let attempt = 0; attempt <= maxContinuations; attempt++) {
-      const result = await sendChatRequest({
+    for (let attempt = 0; attempt <= continuationLimit; attempt++) {
+      const result = await sendChatRequestWithEmptyRetry({
         host: this.config.host,
         model: this.config.model,
         keepAlive: this.config.keepAlive,
         messages: requestMessages,
         options,
         onToken,
-      });
+      }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
 
       reply += result.reply;
 
@@ -88,8 +138,44 @@ export class OllamaService {
   }
 }
 
+async function sendChatRequestWithEmptyRetry(params, { maxEmptyRetries = DEFAULT_EMPTY_RESPONSE_RETRIES } = {}) {
+  let messages = params.messages;
+  const retries = Math.max(0, Number(maxEmptyRetries ?? DEFAULT_EMPTY_RESPONSE_RETRIES));
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await sendChatRequest({
+        ...params,
+        messages,
+      });
+    } catch (error) {
+      const retry = error?.transient === true
+        && error?.code === 'OLLAMA_EMPTY_RESPONSE'
+        && attempt < retries;
+
+      if (!retry) {
+        throw error;
+      }
+
+      messages = createEmptyResponseRetryMessages(messages);
+    }
+  }
+
+  throw createEmptyResponseError();
+}
+
+function createEmptyResponseRetryMessages(messages) {
+  return [
+    ...messages,
+    {
+      role: 'user',
+      content: 'Your previous response was empty. Respond now with a concrete, non-empty answer. If tools are available and the task requires workspace work, call the correct tool instead of returning empty content.',
+    },
+  ];
+}
+
 // Send one Ollama chat request.
-async function sendChatRequest({ host, model, keepAlive, messages, options, onToken }) {
+async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, tools = [], allowToolCalls = false }) {
   const response = await fetch(`${host}/api/chat`, {
     method: 'POST',
     headers: {
@@ -101,6 +187,7 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
       stream: typeof onToken === 'function',
       keep_alive: keepAlive ?? '2m',
       options,
+      ...(tools.length > 0 ? { tools } : {}),
     }),
   }).catch((error) => {
     throw new Error(`Could not reach Ollama at ${host}: ${error.message}`);
@@ -116,14 +203,21 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
   }
 
   const payload = await response.json();
-  const reply = payload.message?.content ?? '';
+  const message = payload.message ?? {};
+  const reply = message.content ?? '';
+  const toolCalls = message.tool_calls ?? [];
 
-  if (!reply) {
-    throw new Error('Ollama returned an empty response.');
+  if (!reply && (!allowToolCalls || toolCalls.length === 0)) {
+    throw createEmptyResponseError();
   }
 
   return {
     reply,
+    message: {
+      role: 'assistant',
+      content: reply,
+      ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    },
     stoppedByLength: payload.done_reason === 'length',
   };
 }
@@ -138,6 +232,8 @@ function createRequestMessages(messages) {
     ...messages.map((message) => ({
       role: message.role,
       content: message.content,
+      ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+      ...(message.tool_name ? { tool_name: message.tool_name } : {}),
     })),
   ];
 }
@@ -195,6 +291,18 @@ function stripJarvisOnlyOptions(options) {
   return ollamaOptions;
 }
 
+// Keep warm-up intentionally tiny; it should probe/load, not stress the machine.
+function createWarmUpOptions(options) {
+  const stripped = stripJarvisOnlyOptions(options);
+
+  return {
+    ...stripped,
+    num_ctx: Math.min(Number(stripped.num_ctx ?? 1024), 1024),
+    num_batch: Math.min(Number(stripped.num_batch ?? 32), 32),
+    num_predict: 1,
+  };
+}
+
 // Detect prompts that should stay extremely short.
 function isSimplePrompt(content) {
   return /^(hi|hii|hello|hey|yo|thanks|thank you|ok|okay|nice|cool)[\s!.?]*$/i.test(content.trim());
@@ -222,7 +330,7 @@ function createLocalFastReply(messages) {
 
 // Detect prompts where a tiny output cap can cause blank or unusable answers.
 function isCodingPrompt(content) {
-  return /\b(code|program|leetcode|solve|java|python|javascript|c\+\+|algorithm|function|class|n queens?|n-queens?)\b/i.test(content);
+  return /\b(code|program|leetcode|solve|java|python|javascript|typescript|html|css|js|c\+\+|algorithm|function|class|n queens?|n-queens?)\b/i.test(content);
 }
 
 // Consume a streaming warm-up response without rendering it.
@@ -287,7 +395,7 @@ async function readStreamingReply(response, onToken) {
   }
 
   if (!reply.trim()) {
-    throw new Error('Ollama returned an empty response.');
+    throw createEmptyResponseError();
   }
 
   return {
@@ -319,3 +427,12 @@ function parseStreamLine(line, { hasReply = false } = {}) {
     stoppedByLength: payload.done_reason === 'length',
   };
 }
+
+// Let the coding scheduler retry occasional blank generations from a loaded model.
+function createEmptyResponseError() {
+  const error = new Error('Ollama returned an empty response after retrying.');
+  error.transient = true;
+  error.code = 'OLLAMA_EMPTY_RESPONSE';
+  return error;
+}
+
