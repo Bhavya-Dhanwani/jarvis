@@ -1,6 +1,7 @@
 // Importing modules
 import express from "express";
 import applyMiddlewares from "./shared/middlewares/index.middleware.js";
+import indexRouter from "./shared/routes/index.router.js";
 
 function createApp() {
 
@@ -9,6 +10,9 @@ function createApp() {
 
     // adding the middewares
     applyMiddlewares(app);
+
+    // adding the routes
+    app.use("/api", indexRouter);
 
     // returning the app
     return app;
