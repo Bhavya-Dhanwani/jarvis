@@ -10,7 +10,7 @@ function startServer() {
 
     // starting the server
     app.listen(env.PORT, () => {
-        console.log(`Server started on http://localhost:${env.PORT}`);
+        void console.log(`Server started on http://localhost:${env.PORT}`);
     })
 
 }

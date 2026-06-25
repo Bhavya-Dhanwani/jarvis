@@ -3,6 +3,7 @@ import express from "express";
 import hpp from "hpp";
 import helmet from "helmet";
 import compression from "compression";
+import requestTimer from "./timer.middleware.js";
 
 // Function to apply the middlewares to the Express app
 function applyMiddlewares(app) {
@@ -13,6 +14,9 @@ function applyMiddlewares(app) {
     app.use(compression()); // Compresses response bodies for better performance
     app.use(express.json()); // Parses incoming JSON requests and puts the parsed data in req.body
     app.use(express.urlencoded({ extended: true })); // Parses incoming requests with URL-encoded payloads
+
+    // adding middleware to calcuate the time taken for each request
+    app.use(requestTimer);
 
 }
 
