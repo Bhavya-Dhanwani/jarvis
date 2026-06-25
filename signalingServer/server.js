@@ -1,11 +1,15 @@
 // Importing modules
 import createApp from "./src/app.js";
 import env from "./src/shared/config/env.config.js";
+import connectDB from "./src/shared/config/db.config.js";
 
 // function to start the server
-function startServer() {
+async function startServer() {
 
-    // making the app 
+    // connecting to the database before starting the server
+    await connectDB();
+
+    // making the app
     const app = createApp();
 
     // starting the server

@@ -1,5 +1,5 @@
 // Funciton to send the reponses in a structured way
-function ApiReponse(res, statusCode, message, data) {
+function ApiResponse(res, statusCode, message, data) {
     
     return res.status(statusCode).json({
         success: true,
@@ -9,4 +9,4 @@ function ApiReponse(res, statusCode, message, data) {
 
 }
 
-export default ApiReponse;
+export default ApiResponse;
