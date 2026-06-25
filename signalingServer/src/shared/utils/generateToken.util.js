@@ -13,3 +13,22 @@ function generateToken(userId) {
 }
 
 export default generateToken;
+
+export function generateAccessToken(userId) {
+    return jwt.sign({ id: userId }, env.JWT_SECRET, {
+        expiresIn: env.JWT_EXPIRY,
+    });
+}
+
+export function generateRefreshToken(userId) {
+    return jwt.sign({ id: userId }, env.JWT_REFRESH_SECRET, {
+        expiresIn: env.JWT_REFRESH_EXPIRY,
+    });
+}
+
+export function generateTokenPair(userId) {
+    return {
+        accessToken: generateAccessToken(userId),
+        refreshToken: generateRefreshToken(userId),
+    };
+}

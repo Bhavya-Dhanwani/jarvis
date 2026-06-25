@@ -4,7 +4,9 @@ import { registerSchema, loginSchema } from "./auth.validation.js";
 import ApiResponse from "../../shared/utils/ApiResponse.util.js";
 import ApiError from "../../shared/utils/ApiError.util.js";
 import asyncWrapper from "../../shared/utils/asyncWrapper.util.js";
-import generateToken from "../../shared/utils/generateToken.util.js";
+import { generateAccessToken, generateTokenPair } from "../../shared/utils/generateToken.util.js";
+import jwt from "jsonwebtoken";
+import env from "../../shared/config/env.config.js";
 
 // controller to register a new user
 export const register = asyncWrapper(async (req, res) => {
@@ -31,8 +33,8 @@ export const register = asyncWrapper(async (req, res) => {
     // creating the new user (the password gets hashed by the model's pre-save hook)
     const user = await User.create({ name, email, password });
 
-    // generating a JWT token for the newly created user
-    const token = generateToken(user._id);
+    // generating JWT tokens for the newly created user
+    const tokens = generateTokenPair(user._id);
 
     // sending back the user details (without the password) and the token
     return ApiResponse(res, 201, "User registered successfully", {
@@ -41,7 +43,7 @@ export const register = asyncWrapper(async (req, res) => {
             name: user.name,
             email: user.email,
         },
-        token,
+        ...tokens,
     });
 });
 
@@ -75,8 +77,8 @@ export const login = asyncWrapper(async (req, res) => {
         throw new ApiError(401, "Invalid email or password");
     }
 
-    // generating a JWT token for the logged in user
-    const token = generateToken(user._id);
+    // generating JWT tokens for the logged in user
+    const tokens = generateTokenPair(user._id);
 
     // sending back the user details (without the password) and the token
     return ApiResponse(res, 200, "Logged in successfully", {
@@ -85,6 +87,35 @@ export const login = asyncWrapper(async (req, res) => {
             name: user.name,
             email: user.email,
         },
-        token,
+        ...tokens,
     });
+});
+
+// controller to mint a new access token from a refresh token
+export const refresh = asyncWrapper(async (req, res) => {
+
+    const { refreshToken } = req.body;
+
+    if (!refreshToken || typeof refreshToken !== "string") {
+        throw new ApiError(400, "Refresh token is required");
+    }
+
+    try {
+        const payload = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET);
+        const user = await User.findById(payload.id);
+
+        if (!user) {
+            throw new ApiError(401, "Invalid refresh token");
+        }
+
+        return ApiResponse(res, 200, "Access token refreshed", {
+            accessToken: generateAccessToken(user._id),
+        });
+    } catch (error) {
+        if (error instanceof ApiError) {
+            throw error;
+        }
+
+        throw new ApiError(401, "Invalid or expired refresh token");
+    }
 });

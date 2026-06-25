@@ -17,7 +17,14 @@ import {
 } from '../services/ollamaStartupService.js';
 import { OllamaService } from '../services/ollamaService.js';
 import { createWorkspaceCommandService } from '../services/workspaceCommandService.js';
-import { runSetupWizard } from '../setup/setupWizard.js';
+import { runChangeWizard, runSetupWizard } from '../setup/setupWizard.js';
+import { claimOllamaUrl, refreshAccessToken } from '../services/authClientService.js';
+import {
+  RUNTIME_MODES,
+  loadAuth,
+  loadJarvisConfig,
+  saveJarvisConfig,
+} from '../services/runtimeModeService.js';
 import { renderDoctorReport } from '../ui/doctor.js';
 import { warningBox } from '../ui/theme.js';
 import { printCommands, printHelp, printVersion } from './commands.js';
@@ -75,6 +82,15 @@ export async function runCli(args, context = {}) {
     });
   }
 
+  // Handle runtime mode changes.
+  if (command.command === 'change') {
+    return runChangeWizard({
+      input: context.input,
+      output: context.outputStream ?? process.stdout,
+      env: context.env ?? process.env,
+    });
+  }
+
   // Handle unknown commands.
   if (command.command === 'unknown') {
     // Throw a usage-focused error.
@@ -96,6 +112,7 @@ export async function runCli(args, context = {}) {
       assistantService: context.assistantService,
       env: context.env ?? process.env,
     });
+    await prepareRuntimeConfig(context);
     const modelConfig = createModelConfig({ env: context.env ?? process.env });
     const readiness = await checkOllamaReadiness(modelConfig, context);
 
@@ -125,6 +142,7 @@ export async function runCli(args, context = {}) {
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
+    await prepareRuntimeConfig(context);
     const modelConfig = createModelConfig({ env: context.env ?? process.env });
     const readiness = await checkOllamaReadiness(modelConfig, context);
 
@@ -159,6 +177,7 @@ export async function runCli(args, context = {}) {
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
+    await prepareRuntimeConfig(context);
     const modelConfig = createModelConfig({ env: context.env ?? process.env });
     const readiness = await checkOllamaReadiness(modelConfig, context);
 
@@ -209,6 +228,46 @@ export async function runCli(args, context = {}) {
 
   // Guard against parser and handler mismatch.
   throw new Error(`Unsupported command: ${command.command}`);
+}
+
+async function prepareRuntimeConfig(context = {}) {
+  const env = context.env ?? process.env;
+  const config = loadJarvisConfig({ env });
+
+  if (config?.mode !== RUNTIME_MODES.CLIENT) {
+    return config;
+  }
+
+  const auth = loadAuth({ env });
+
+  if (!auth?.refreshToken || !auth?.serverUrl) {
+    throw new Error('Client mode needs auth. Run "jarvis setup" or "jarvis change" and login first.');
+  }
+
+  const accessToken = await refreshAccessToken({
+    serverUrl: auth.serverUrl,
+    refreshToken: auth.refreshToken,
+  });
+  const claimed = await claimOllamaUrl({
+    serverUrl: auth.serverUrl,
+    accessToken,
+  });
+  const url = claimed.data?.url;
+
+  if (!url) {
+    throw new Error('URL not available. Waiting for the host to provide one. Start the host, then run Jarvis again.');
+  }
+
+  await saveJarvisConfig({
+    dataRoot: config.dataRoot,
+    mode: RUNTIME_MODES.CLIENT,
+    model: config.model,
+    host: url,
+    signalingServerUrl: auth.serverUrl,
+    remoteHostTemporary: true,
+  });
+
+  return { ...config, host: url };
 }
 
 async function checkOllamaReadiness(modelConfig, context = {}) {

@@ -14,6 +14,8 @@ const envSchema = z.object({
     PORT: z.coerce.number().default(envConstants.PORT),
     JWT_SECRET: z.string().default(envConstants.JWT_SECRET),
     JWT_EXPIRY: z.string().default(envConstants.JWT_EXPIRY),
+    JWT_REFRESH_SECRET: z.string().default(envConstants.JWT_REFRESH_SECRET),
+    JWT_REFRESH_EXPIRY: z.string().default(envConstants.JWT_REFRESH_EXPIRY),
 });
 
 // Parsing and validating the environment variables

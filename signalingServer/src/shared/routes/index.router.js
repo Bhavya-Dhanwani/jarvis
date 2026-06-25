@@ -2,6 +2,7 @@
 import express from "express";
 import ApiResponse from "../utils/ApiResponse.util.js";
 import authRouter from "../../features/auth/auth.router.js";
+import ollamaUrlRouter from "../../features/ollamaUrl/ollamaUrl.router.js";
 
 // making the router
 const router = express.Router();
@@ -13,6 +14,9 @@ router.get("/health", (req, res) => {
 
 // adding the auth routes
 router.use("/auth", authRouter);
+
+// adding the temporary Ollama URL routes
+router.use("/ollama-url", ollamaUrlRouter);
 
 // Exporting the router
 export default router;

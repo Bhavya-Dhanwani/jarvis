@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { detectSystem } from './detectSystem.js';
@@ -14,6 +14,14 @@ import {
   waitForOllamaServer,
 } from './ollama.js';
 import { DEFAULT_MODEL } from './model.js';
+import { authenticateWithServer, claimOllamaUrl, publishOllamaUrl } from '../services/authClientService.js';
+import {
+  RUNTIME_MODES,
+  getDefaultDataRoot,
+  loadJarvisConfig,
+  saveJarvisConfig,
+} from '../services/runtimeModeService.js';
+import { startBestTunnel } from '../services/tunnelService.js';
 import {
   downloadWindowsInstaller,
   ensureWindowsPathContains,
@@ -57,6 +65,16 @@ export async function runSetupWizard({
       return { status: 'aborted' };
     }
 
+    const mode = await chooseRuntimeMode(prompts);
+    const savedConfig = loadJarvisConfig({ env });
+    const defaultServerUrl = env.JARVIS_SIGNALING_SERVER_URL
+      ?? savedConfig?.signalingServerUrl
+      ?? 'http://localhost:5000';
+
+    if (mode === RUNTIME_MODES.CLIENT) {
+      return await runClientSetup({ prompts, output, env, defaultServerUrl });
+    }
+
     output.write(section('SYSTEM SCAN'));
     const system = await withSpinner('Scanning host system', async () => detectSystem(), { output });
     output.write(statusLine('success', 'OS detected', `${system.os} ${system.release}`));
@@ -86,14 +104,47 @@ export async function runSetupWizard({
       output,
     });
 
+    let auth = null;
+    let publicOllamaUrl = null;
+    let signalingServerUrl = savedConfig?.signalingServerUrl;
+
+    if (mode === RUNTIME_MODES.HOST) {
+      output.write(section('HOST LINK'));
+      auth = await authenticateWithServer({
+        prompts,
+        output,
+        defaultServerUrl,
+        dataRoot,
+      });
+      signalingServerUrl = auth.serverUrl;
+      const tunnel = await withSpinner(
+        'Opening public Ollama tunnel',
+        () => startBestTunnel({ localUrl: OLLAMA_HOST, output }),
+        { output },
+      );
+      publicOllamaUrl = tunnel.url;
+      await withSpinner(
+        'Publishing temporary Ollama URL',
+        () => publishOllamaUrl({
+          serverUrl: auth.serverUrl,
+          accessToken: auth.accessToken,
+          ollamaUrl: publicOllamaUrl,
+        }),
+        { output },
+      );
+      output.write(statusLine('success', 'Host URL published', publicOllamaUrl));
+    }
+
     output.write(section('CONFIGURATION'));
     const configPath = await saveConfig({
       dataRoot,
+      mode,
       model: modelStatus.model,
       host: OLLAMA_HOST,
       system,
       prompts,
       output,
+      signalingServerUrl,
     });
 
     output.write(card('STATUS CARDS', [
@@ -103,6 +154,8 @@ export async function runSetupWizard({
       ['Ollama version', ollamaVersion],
       ['Selected model', modelStatus.model],
       ['Model status', modelStatus.pulled ? 'Downloaded' : 'Ready'],
+      ['Runtime mode', mode],
+      ...(publicOllamaUrl ? [['Published URL', publicOllamaUrl]] : []),
     ], { borderColor: 'cyan' }));
     output.write('\n');
 
@@ -115,6 +168,7 @@ export async function runSetupWizard({
       ['JARVIS data', dataRoot],
       ['Ollama host', OLLAMA_HOST],
       ['Model', modelStatus.model],
+      ['Runtime mode', mode],
     ], { borderColor: 'green' }));
     output.write('\n');
     banner('JARVIS is online. Local AI core ready.', { output });
@@ -122,6 +176,7 @@ export async function runSetupWizard({
     return {
       status: 'ok',
       command: 'setup',
+      mode,
       model: modelStatus.model,
       dataRoot,
     };
@@ -133,6 +188,125 @@ export async function runSetupWizard({
   } finally {
     prompts.close();
   }
+}
+
+export async function runChangeWizard({
+  input = process.stdin,
+  output = process.stdout,
+  env = process.env,
+} = {}) {
+  const prompts = new PromptSession({ input, output });
+
+  try {
+    output.write(section('CHANGE RUNTIME MODE'));
+    const mode = await chooseRuntimeMode(prompts);
+    const savedConfig = loadJarvisConfig({ env });
+    const dataRoot = savedConfig?.dataRoot ?? getDefaultDataRoot();
+    const defaultServerUrl = env.JARVIS_SIGNALING_SERVER_URL
+      ?? savedConfig?.signalingServerUrl
+      ?? 'http://localhost:5000';
+
+    if (mode === RUNTIME_MODES.CLIENT) {
+      return await runClientSetup({ prompts, output, env, defaultServerUrl });
+    }
+
+    const configPath = await saveJarvisConfig({
+      dataRoot,
+      mode,
+      model: savedConfig?.model ?? env.JARVIS_OLLAMA_MODEL ?? DEFAULT_MODEL,
+      host: OLLAMA_HOST,
+      signalingServerUrl: mode === RUNTIME_MODES.HOST ? defaultServerUrl : savedConfig?.signalingServerUrl,
+      remoteHostTemporary: false,
+    });
+
+    output.write(successBox(`Runtime mode changed to ${mode}.`));
+    output.write(statusLine('success', 'Configuration saved', configPath));
+    return { status: 'ok', command: 'change', mode, configPath };
+  } catch (error) {
+    output.write('\n');
+    output.write(errorBox(error.message));
+    process.exitCode = 1;
+    return { status: 'failed', command: 'change', error };
+  } finally {
+    prompts.close();
+  }
+}
+
+async function chooseRuntimeMode(prompts) {
+  return prompts.select('Choose Jarvis runtime mode', [
+    {
+      title: 'Self-hosted',
+      description: 'Use local Ollama without Jarvis server auth.',
+      value: RUNTIME_MODES.SELF_HOSTED,
+    },
+    {
+      title: 'Host',
+      description: 'Run local Ollama, expose it through a tunnel, and publish the temporary URL.',
+      value: RUNTIME_MODES.HOST,
+    },
+    {
+      title: 'Client',
+      description: 'Login and request a temporary Ollama URL from the host.',
+      value: RUNTIME_MODES.CLIENT,
+    },
+  ]);
+}
+
+async function runClientSetup({ prompts, output, env, defaultServerUrl }) {
+  const savedConfig = loadJarvisConfig({ env });
+  const dataRoot = savedConfig?.dataRoot ?? getDefaultDataRoot();
+  const auth = await authenticateWithServer({
+    prompts,
+    output,
+    defaultServerUrl,
+    dataRoot,
+  });
+  const claimed = await waitForPublishedOllamaUrl({
+    serverUrl: auth.serverUrl,
+    accessToken: auth.accessToken,
+    output,
+  });
+  const configPath = await saveJarvisConfig({
+    dataRoot,
+    mode: RUNTIME_MODES.CLIENT,
+    model: savedConfig?.model ?? env.JARVIS_OLLAMA_MODEL ?? DEFAULT_MODEL,
+    host: claimed.url,
+    signalingServerUrl: auth.serverUrl,
+    remoteHostTemporary: true,
+  });
+
+  output.write(successBox('Client mode is ready. Temporary Ollama URL received from host.'));
+  output.write(card('CONFIG SUMMARY', [
+    ['Config', configPath],
+    ['Runtime mode', RUNTIME_MODES.CLIENT],
+    ['Temporary Ollama host', claimed.url],
+  ], { borderColor: 'green' }));
+  output.write('\n');
+
+  return {
+    status: 'ok',
+    command: 'setup',
+    mode: RUNTIME_MODES.CLIENT,
+    host: claimed.url,
+    dataRoot,
+  };
+}
+
+async function waitForPublishedOllamaUrl({ serverUrl, accessToken, output, attempts = 12 }) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await claimOllamaUrl({ serverUrl, accessToken });
+    const url = response.data?.url;
+
+    if (url) {
+      output.write(statusLine('success', 'Temporary host URL received', url));
+      return { url };
+    }
+
+    output.write(statusLine('warning', 'URL not available', 'waiting for the host to provide one'));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+
+  throw new Error('URL not available. Waiting timed out before the host provided an Ollama URL.');
 }
 
 async function chooseWindowsDataRoot(prompts, output) {
@@ -377,7 +551,7 @@ async function ensureSelectedModel(prompts, { defaultModel, output }) {
   return { model: selectedModel, pulled: true };
 }
 
-async function saveConfig({ dataRoot, model, host, system, prompts, output }) {
+async function saveConfig({ dataRoot, mode, model, host, system, prompts, output, signalingServerUrl }) {
   const configPath = join(dataRoot, 'config.json');
   await mkdir(dirname(configPath), { recursive: true });
 
@@ -393,22 +567,17 @@ async function saveConfig({ dataRoot, model, host, system, prompts, output }) {
     }
   }
 
-  const config = {
-    name: 'JARVIS',
+  const configPathSaved = await saveJarvisConfig({
+    dataRoot,
+    mode,
     model,
     host,
-    dataRoot,
-    createdAt: new Date().toISOString(),
-    system: {
-      os: system.os,
-      platform: system.platform,
-      arch: system.arch,
-    },
-  };
-
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { flag: 'w' });
+    system,
+    signalingServerUrl,
+    remoteHostTemporary: false,
+  });
   output.write(statusLine('success', 'Configuration saved', configPath));
-  return configPath;
+  return configPathSaved;
 }
 
 function detectWindowsDrives() {

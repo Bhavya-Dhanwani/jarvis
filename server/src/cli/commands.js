@@ -18,6 +18,7 @@ Usage:
   jarvis commands                Show commands available inside chat
   jarvis doctor                  Check local system and Ollama readiness
   jarvis setup                   Run guided first-run local AI setup
+  jarvis change                  Change Jarvis runtime mode
 
 Options:
   -h, --help                     Show help
