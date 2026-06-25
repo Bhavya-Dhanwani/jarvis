@@ -210,6 +210,42 @@ export async function runChangeWizard({
       return await runClientSetup({ prompts, output, env, defaultServerUrl });
     }
 
+    if (mode === RUNTIME_MODES.HOST) {
+      const auth = await authenticateWithServer({
+        prompts,
+        output,
+        defaultServerUrl,
+        dataRoot,
+      });
+      const tunnel = await withSpinner(
+        'Opening public Ollama tunnel',
+        () => startBestTunnel({ localUrl: OLLAMA_HOST, output }),
+        { output },
+      );
+      await withSpinner(
+        'Publishing temporary Ollama URL',
+        () => publishOllamaUrl({
+          serverUrl: auth.serverUrl,
+          accessToken: auth.accessToken,
+          ollamaUrl: tunnel.url,
+        }),
+        { output },
+      );
+      const configPath = await saveJarvisConfig({
+        dataRoot,
+        mode,
+        model: savedConfig?.model ?? env.JARVIS_OLLAMA_MODEL ?? DEFAULT_MODEL,
+        host: OLLAMA_HOST,
+        signalingServerUrl: auth.serverUrl,
+        remoteHostTemporary: false,
+      });
+
+      output.write(successBox('Host mode is ready. Temporary Ollama URL published.'));
+      output.write(statusLine('success', 'Published URL', tunnel.url));
+      output.write(statusLine('success', 'Configuration saved', configPath));
+      return { status: 'ok', command: 'change', mode, configPath, publishedUrl: tunnel.url };
+    }
+
     const configPath = await saveJarvisConfig({
       dataRoot,
       mode,
