@@ -36,7 +36,9 @@ export async function startBestTunnel({
     return startTunnelProcess({
       command: 'ngrok',
       provider: 'ngrok',
-      args: ['http', localUrl],
+      // ngrok forwards its public hostname as the Host header by default, which
+      // Ollama rejects with a 403. Rewrite it to the local origin like cloudflared.
+      args: ['http', '--host-header', localHostHeader(localUrl) ?? 'localhost:11434', localUrl],
       pattern: NGROK_URL_PATTERN,
       output,
       timeoutMs,

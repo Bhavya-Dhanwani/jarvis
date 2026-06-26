@@ -19,10 +19,14 @@ export async function ensureOllamaReady({
 
   if (!initial.available) {
     if (!allowLocalStart) {
-      return missingSetup(`Remote Ollama host is not reachable: ${modelConfig.host}`, {
-        remote: true,
-        host: modelConfig.host,
-      });
+      return missingSetup(
+        `Remote Ollama host is not reachable: ${modelConfig.host} (${describeFetchFailure(initial)})`,
+        {
+          remote: true,
+          host: modelConfig.host,
+          status: initial.status,
+        },
+      );
     }
 
     const started = await startServer();
@@ -84,6 +88,7 @@ async function fetchOllamaTags(host, { fetchImpl }) {
       return {
         available: false,
         models: [],
+        status: response.status,
       };
     }
 
@@ -100,6 +105,23 @@ async function fetchOllamaTags(host, { fetchImpl }) {
       error,
     };
   }
+}
+
+// Turn a failed tag fetch into a short, actionable reason for the host/client.
+function describeFetchFailure(result) {
+  if (result?.status === 403) {
+    return 'HTTP 403 - tunnel reached Ollama but the Host header was rejected; the tunnel must rewrite Host to localhost:11434';
+  }
+
+  if (typeof result?.status === 'number') {
+    return `HTTP ${result.status} from the tunnel`;
+  }
+
+  if (result?.error) {
+    return `network error: ${result.error.message ?? result.error.code ?? 'unreachable'} - the public URL did not route back to this machine (firewall/QUIC blocked?)`;
+  }
+
+  return 'no response from the public URL';
 }
 
 async function waitForOllama(host, { fetchImpl, timeoutMs, pollIntervalMs }) {

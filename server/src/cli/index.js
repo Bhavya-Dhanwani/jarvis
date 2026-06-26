@@ -460,7 +460,7 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
       ollamaStartupOptions: {
         ...(context.ollamaStartupOptions ?? {}),
         allowLocalStart: false,
-        timeoutMs: context.hostTunnelVerifyTimeoutMs ?? 3000,
+        timeoutMs: context.hostTunnelVerifyTimeoutMs ?? 6000,
         pollIntervalMs: 250,
       },
     });
@@ -470,7 +470,10 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
       return true;
     }
 
-    output(statusLine('warning', 'Public tunnel not ready', 'keeping tunnel open until Ollama is reachable'));
+    const detail = readiness.reason
+      ? `${readiness.reason} (attempt ${attempt})`
+      : 'keeping tunnel open until Ollama is reachable';
+    output(statusLine('warning', 'Public tunnel not ready', detail));
     await wait(pollIntervalMs);
   }
 
