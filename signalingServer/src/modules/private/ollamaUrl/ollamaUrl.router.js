@@ -1,5 +1,5 @@
 import express from "express";
-import requireAuth from "../../shared/middlewares/auth.middleware.js";
+import requireAuth from "../../../shared/middlewares/auth.middleware.js";
 import { claimOllamaUrl, publishOllamaUrl } from "./ollamaUrl.controller.js";
 
 const router = express.Router();

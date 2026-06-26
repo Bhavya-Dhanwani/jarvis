@@ -1,12 +1,12 @@
 // Importing modules
-import User from "./auth.model.js";
 import { registerSchema, loginSchema } from "./auth.validation.js";
-import ApiResponse from "../../shared/utils/ApiResponse.util.js";
-import ApiError from "../../shared/utils/ApiError.util.js";
-import asyncWrapper from "../../shared/utils/asyncWrapper.util.js";
-import { generateAccessToken, generateTokenPair } from "../../shared/utils/generateToken.util.js";
+import ApiResponse from "../../../shared/utils/ApiResponse.util.js";
+import ApiError from "../../../shared/utils/ApiError.util.js";
+import asyncWrapper from "../../../shared/utils/asyncWrapper.util.js";
+import { createUser, findUserByEmail, findUserById } from "../../../shared/dao/user.dao.js";
+import { generateAccessToken, generateTokenPair } from "../../../shared/utils/generateToken.util.js";
 import jwt from "jsonwebtoken";
-import env from "../../shared/config/env.config.js";
+import env from "../../../shared/config/env.config.js";
 
 // controller to register a new user
 export const register = asyncWrapper(async (req, res) => {
@@ -23,7 +23,7 @@ export const register = asyncWrapper(async (req, res) => {
     const { name, email, password } = parsed.data;
 
     // checking if a user with this email already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await findUserByEmail(email);
 
     // throwing an error if the email is already taken
     if (existingUser) {
@@ -31,7 +31,7 @@ export const register = asyncWrapper(async (req, res) => {
     }
 
     // creating the new user (the password gets hashed by the model's pre-save hook)
-    const user = await User.create({ name, email, password });
+    const user = await createUser({ name, email, password });
 
     // generating JWT tokens for the newly created user
     const tokens = generateTokenPair(user._id);
@@ -62,7 +62,7 @@ export const login = asyncWrapper(async (req, res) => {
     const { email, password } = parsed.data;
 
     // finding the user by their email
-    const user = await User.findOne({ email });
+    const user = await findUserByEmail(email);
 
     // throwing an error if no user was found with this email
     if (!user) {
@@ -102,7 +102,7 @@ export const refresh = asyncWrapper(async (req, res) => {
 
     try {
         const payload = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET);
-        const user = await User.findById(payload.id);
+        const user = await findUserById(payload.id);
 
         if (!user) {
             throw new ApiError(401, "Invalid refresh token");

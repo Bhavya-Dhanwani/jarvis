@@ -1,7 +1,7 @@
 import z from "zod";
-import ApiResponse from "../../shared/utils/ApiResponse.util.js";
-import ApiError from "../../shared/utils/ApiError.util.js";
-import asyncWrapper from "../../shared/utils/asyncWrapper.util.js";
+import ApiResponse from "../../../shared/utils/ApiResponse.util.js";
+import ApiError from "../../../shared/utils/ApiError.util.js";
+import asyncWrapper from "../../../shared/utils/asyncWrapper.util.js";
 
 const publishSchema = z.object({
     url: z.string().url("Please provide a valid Ollama URL"),

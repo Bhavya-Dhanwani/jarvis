@@ -1,8 +1,8 @@
 // Importing modules
 import express from "express";
 import ApiResponse from "../utils/ApiResponse.util.js";
-import authRouter from "../../features/auth/auth.router.js";
-import ollamaUrlRouter from "../../features/ollamaUrl/ollamaUrl.router.js";
+import authRouter from "../../modules/public/auth/auth.router.js";
+import ollamaUrlRouter from "../../modules/private/ollamaUrl/ollamaUrl.router.js";
 
 // making the router
 const router = express.Router();

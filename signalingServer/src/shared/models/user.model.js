@@ -33,10 +33,10 @@ const userSchema = new mongoose.Schema(
 );
 
 // running this function right before a user document is saved
-userSchema.pre("save", async function (next) {
+userSchema.pre("save", async function () {
 
     // skipping hashing if the password was not changed (e.g. on profile updates)
-    if (!this.isModified("password")) return next();
+    if (!this.isModified("password")) return;
 
     // generating a salt to make the hash stronger
     const salt = await bcrypt.genSalt(10);
@@ -45,7 +45,7 @@ userSchema.pre("save", async function (next) {
     this.password = await bcrypt.hash(this.password, salt);
 
     // moving on to actually saving the document
-    next();
+    // next();
 });
 
 // adding a helper method to check if a given password matches the stored hash
