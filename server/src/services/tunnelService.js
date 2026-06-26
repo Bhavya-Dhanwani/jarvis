@@ -20,10 +20,12 @@ export async function startBestTunnel({
   timeoutMs = 20000,
   dataRoot = getDefaultDataRoot(),
 } = {}) {
+  const cloudflaredArgs = buildCloudflaredArgs(localUrl);
+
   if (await commandExists('cloudflared')) {
     return startTunnelProcess({
       command: 'cloudflared',
-      args: ['tunnel', '--url', localUrl],
+      args: cloudflaredArgs,
       pattern: CLOUDFLARED_URL_PATTERN,
       output,
       timeoutMs,
@@ -47,7 +49,7 @@ export async function startBestTunnel({
     return startTunnelProcess({
       command: managedCloudflared,
       provider: 'cloudflared',
-      args: ['tunnel', '--url', localUrl],
+      args: cloudflaredArgs,
       pattern: CLOUDFLARED_URL_PATTERN,
       output,
       timeoutMs,
@@ -55,6 +57,28 @@ export async function startBestTunnel({
   }
 
   throw new Error('Could not prepare a tunnel automatically. Check your internet connection and run host setup again.');
+}
+
+// Ollama rejects requests whose Host header is not localhost/127.0.0.1 with a 403.
+// cloudflared forwards the public *.trycloudflare.com hostname by default, so we
+// rewrite the Host header to the local origin to keep Ollama reachable through the tunnel.
+function buildCloudflaredArgs(localUrl) {
+  const args = ['tunnel', '--url', localUrl];
+  const hostHeader = localHostHeader(localUrl);
+
+  if (hostHeader) {
+    args.push('--http-host-header', hostHeader);
+  }
+
+  return args;
+}
+
+function localHostHeader(localUrl) {
+  try {
+    return new URL(localUrl).host;
+  } catch {
+    return null;
+  }
 }
 
 async function commandExists(command) {
