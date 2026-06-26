@@ -154,7 +154,7 @@ test('CLI host mode publishes temporary Ollama URL and exits', async () => {
       return 'access-token';
     },
     startBestTunnel: async ({ localUrl, dataRoot: tunnelDataRoot, output }) => {
-      assert.equal(localUrl, 'http://localhost:11434');
+      assert.equal(localUrl, 'http://127.0.0.1:11434');
       assert.equal(tunnelDataRoot, dataRoot);
       output.write('Tunnel online through cloudflared: https://host.trycloudflare.com\n');
       return {
@@ -179,6 +179,55 @@ test('CLI host mode publishes temporary Ollama URL and exits', async () => {
   assert.match(tunnelOutput.join(''), /Tunnel online/);
 });
 
+// Verify host mode does not publish a tunnel URL that cannot reach Ollama.
+test('CLI host mode refuses to publish an unreachable public tunnel', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-host-bad-tunnel-'));
+  const configPath = join(dataRoot, 'config.json');
+  const authPath = join(dataRoot, 'auth.json');
+  const published = [];
+
+  writeFileSync(configPath, JSON.stringify({
+    mode: 'host',
+    model: 'gemma4:e4b',
+    host: 'http://localhost:11434',
+    dataRoot,
+    signalingServerUrl: 'https://jarvis.example.com',
+  }));
+  writeFileSync(authPath, JSON.stringify({
+    refreshToken: 'refresh-token',
+    serverUrl: 'https://jarvis.example.com',
+  }));
+
+  const result = await runCli([], {
+    env: {
+      JARVIS_CONFIG_PATH: configPath,
+    },
+    output: () => {},
+    outputStream: {
+      write: () => {},
+    },
+    ensureOllamaReady: async ({ modelConfig }) => (
+      modelConfig.host.startsWith('https://')
+        ? { ready: false, remote: true, reason: 'Remote Ollama host is not reachable' }
+        : { ready: true }
+    ),
+    hostTunnelVerifyMaxAttempts: 1,
+    hostTunnelVerifyPollIntervalMs: 1,
+    refreshAccessToken: async () => 'access-token',
+    startBestTunnel: async () => ({
+      provider: 'cloudflared',
+      url: 'https://bad.trycloudflare.com',
+    }),
+    publishOllamaUrl: async (payload) => {
+      published.push(payload);
+      return { success: true };
+    },
+  });
+
+  assert.equal(result.status, 'tunnel-unreachable');
+  assert.equal(result.publishedUrl, null);
+  assert.deepEqual(published, []);
+});
 // Verify model-backed workers feed completed outputs into review.
 test('coding agent service runs specialist agents and reviews their outputs', async () => {
   const calls = [];

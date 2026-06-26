@@ -7,6 +7,8 @@ const publishSchema = z.object({
     url: z.string().url("Please provide a valid Ollama URL"),
 });
 
+const OLLAMA_URL_TTL_MS = 45000;
+
 let currentOllamaUrl = null;
 let lastClientRequestAt = null;
 
@@ -34,11 +36,12 @@ export const publishOllamaUrl = asyncWrapper(async (req, res) => {
 export const claimOllamaUrl = asyncWrapper(async (_req, res) => {
     lastClientRequestAt = new Date().toISOString();
 
-    if (!currentOllamaUrl?.url) {
+    if (!currentOllamaUrl?.url || isExpired(currentOllamaUrl.publishedAt)) {
         return ApiResponse(res, 200, "URL not available. Waiting for the host to provide one.", {
             available: false,
             url: null,
             needsHost: true,
+            expired: Boolean(currentOllamaUrl?.url),
             requestedAt: lastClientRequestAt,
         });
     }
@@ -50,3 +53,11 @@ export const claimOllamaUrl = asyncWrapper(async (_req, res) => {
         requestedAt: lastClientRequestAt,
     });
 });
+
+function isExpired(publishedAt) {
+    if (!publishedAt) {
+        return true;
+    }
+
+    return Date.now() - Date.parse(publishedAt) > OLLAMA_URL_TTL_MS;
+}

@@ -327,17 +327,28 @@ async function handleHostPublisherRuntime(context = {}) {
     serverUrl: auth.serverUrl,
     refreshToken: auth.refreshToken,
   });
+  const tunnelLocalUrl = normalizeLocalOllamaTunnelTarget(modelConfig.host);
   const tunnel = await openTunnel({
-    localUrl: modelConfig.host,
+    localUrl: tunnelLocalUrl,
     output: outputStream,
     dataRoot: config.dataRoot,
   });
 
-  await waitForPublishedTunnelReady({
+  const tunnelVerified = await waitForPublishedTunnelReady({
     context,
     output,
     modelConfig: { ...modelConfig, host: tunnel.url },
   });
+
+  if (!tunnelVerified) {
+    tunnel.process?.kill?.();
+    return {
+      status: 'tunnel-unreachable',
+      command: 'host',
+      mode: RUNTIME_MODES.HOST,
+      publishedUrl: null,
+    };
+  }
 
   await publish({
     serverUrl: auth.serverUrl,
@@ -374,9 +385,23 @@ async function handleHostPublisherRuntime(context = {}) {
   return result;
 }
 
+function normalizeLocalOllamaTunnelTarget(host) {
+  try {
+    const parsed = new URL(host);
+
+    if (['localhost', '::1', '[::1]'].includes(parsed.hostname)) {
+      parsed.hostname = '127.0.0.1';
+    }
+
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return 'http://127.0.0.1:11434';
+  }
+}
+
 async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
   if (context.verifyPublishedTunnel === false) {
-    return;
+    return true;
   }
 
   const maxAttempts = context.hostTunnelVerifyMaxAttempts ?? 8;
@@ -395,7 +420,7 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
 
     if (readiness.ready) {
       output(statusLine('success', 'Public Ollama tunnel verified', modelConfig.host));
-      return;
+      return true;
     }
 
     output(statusLine('warning', 'Public tunnel not ready', 'waiting before publishing URL'));
@@ -403,11 +428,12 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
   }
 
   output(warningBox([
-    'The host tunnel URL was created, but Jarvis could not verify Ollama through it yet.',
+    'The host tunnel URL was created, but Jarvis could not reach Ollama through it.',
     '',
-    'The URL will still be published so clients can keep retrying while the tunnel finishes connecting.',
-    `Published host: ${modelConfig.host}`,
+    'Jarvis did not publish this broken URL. Keep this host command open and fix local Ollama or the tunnel, then run host again.',
+    `Unverified host: ${modelConfig.host}`,
   ].join('\n')));
+  return false;
 }
 
 async function keepHostPublisherOnline({ context, output, publish, serverUrl, accessToken, tunnel }) {

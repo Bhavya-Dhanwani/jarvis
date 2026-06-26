@@ -8,7 +8,7 @@ import { dirname } from 'node:path';
 import { ensureWindowsPathContains, findWindowsOllamaExecutable } from './windowsSetup.js';
 
 // Define the local Ollama API endpoint used by JARVIS.
-export const OLLAMA_HOST = 'http://localhost:11434';
+export const OLLAMA_HOST = 'http://127.0.0.1:11434';
 
 // Check whether the Ollama CLI exists and report its version.
 export async function getOllamaVersion() {

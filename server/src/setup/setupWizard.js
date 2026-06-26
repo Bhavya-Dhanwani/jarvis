@@ -495,7 +495,7 @@ async function ensureOllamaServer(prompts, { output }) {
   );
 
   if (running) {
-    output.write(statusLine('success', 'Ollama server', 'http://localhost:11434/api/tags'));
+    output.write(statusLine('success', 'Ollama server', 'http://127.0.0.1:11434/api/tags'));
     return;
   }
 
@@ -518,7 +518,7 @@ async function ensureOllamaServer(prompts, { output }) {
   );
 
   if (!ready) {
-    throw new Error('Ollama server did not respond at http://localhost:11434/api/tags. Try running "ollama serve".');
+    throw new Error('Ollama server did not respond at http://127.0.0.1:11434/api/tags. Try running "ollama serve".');
   }
 
   output.write(statusLine('success', 'Ollama server', 'Online'));
