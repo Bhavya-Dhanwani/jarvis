@@ -307,10 +307,12 @@ async function handleHostPublisherRuntime(context = {}) {
   const output = context.output ?? console.log;
   const outputStream = context.outputStream ?? process.stdout;
   const modelConfig = createModelConfig({ env });
-  const readiness = await checkOllamaReadiness(modelConfig, context);
+  const tunnelLocalUrl = await resolveLocalOllamaTunnelTarget(modelConfig.host, context);
+  const hostModelConfig = { ...modelConfig, host: tunnelLocalUrl };
+  const readiness = await checkOllamaReadiness(hostModelConfig, context);
 
   if (!readiness.ready) {
-    output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
+    output(warningBox(formatOllamaSetupRequired(readiness, hostModelConfig)));
     return { status: 'setup-required', command: 'host', readiness };
   }
 
@@ -327,7 +329,6 @@ async function handleHostPublisherRuntime(context = {}) {
     serverUrl: auth.serverUrl,
     refreshToken: auth.refreshToken,
   });
-  const tunnelLocalUrl = normalizeLocalOllamaTunnelTarget(modelConfig.host);
   const tunnel = await openTunnel({
     localUrl: tunnelLocalUrl,
     output: outputStream,
@@ -385,17 +386,62 @@ async function handleHostPublisherRuntime(context = {}) {
   return result;
 }
 
-function normalizeLocalOllamaTunnelTarget(host) {
+async function resolveLocalOllamaTunnelTarget(host, context = {}) {
+  const candidates = buildLocalOllamaCandidates(host);
+  const checker = context.ensureOllamaReady ?? ensureOllamaReady;
+
+  for (const candidate of candidates) {
+    const readiness = await checker({
+      modelConfig: {
+        ...createModelConfig({ env: context.env ?? process.env }),
+        host: candidate,
+      },
+      ...(context.ollamaStartupOptions ?? {}),
+      allowLocalStart: false,
+    });
+
+    if (readiness.ready) {
+      return candidate;
+    }
+  }
+
+  return candidates[0] ?? 'http://localhost:11434';
+}
+
+function buildLocalOllamaCandidates(host) {
+  const candidates = [];
+  const add = (value) => {
+    const normalized = normalizeUrl(value);
+
+    if (normalized && !candidates.includes(normalized)) {
+      candidates.push(normalized);
+    }
+  };
+
+  add(host);
+  add(rewriteHostname(host, 'localhost'));
+  add(rewriteHostname(host, '127.0.0.1'));
+  add('http://localhost:11434');
+  add('http://127.0.0.1:11434');
+
+  return candidates;
+}
+
+function rewriteHostname(host, hostname) {
   try {
     const parsed = new URL(host);
-
-    if (['localhost', '::1', '[::1]'].includes(parsed.hostname)) {
-      parsed.hostname = '127.0.0.1';
-    }
-
-    return parsed.toString().replace(/\/$/, '');
+    parsed.hostname = hostname;
+    return parsed.toString();
   } catch {
-    return 'http://127.0.0.1:11434';
+    return null;
+  }
+}
+
+function normalizeUrl(value) {
+  try {
+    return new URL(value).toString().replace(/\/$/, '');
+  } catch {
+    return null;
   }
 }
 
@@ -404,7 +450,8 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
     return true;
   }
 
-  const maxAttempts = context.hostTunnelVerifyMaxAttempts ?? 8;
+  const keepWaiting = shouldKeepHostTunnelWaiting(context);
+  const maxAttempts = keepWaiting ? Infinity : (context.hostTunnelVerifyMaxAttempts ?? 8);
   const pollIntervalMs = context.hostTunnelVerifyPollIntervalMs ?? 1000;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -423,7 +470,7 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
       return true;
     }
 
-    output(statusLine('warning', 'Public tunnel not ready', 'waiting before publishing URL'));
+    output(statusLine('warning', 'Public tunnel not ready', 'keeping tunnel open until Ollama is reachable'));
     await wait(pollIntervalMs);
   }
 
@@ -436,6 +483,13 @@ async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
   return false;
 }
 
+function shouldKeepHostTunnelWaiting(context = {}) {
+  if (typeof context.hostTunnelKeepWaiting === 'boolean') {
+    return context.hostTunnelKeepWaiting;
+  }
+
+  return shouldKeepHostOnline(context);
+}
 async function keepHostPublisherOnline({ context, output, publish, serverUrl, accessToken, tunnel }) {
   const intervalMs = context.hostRepublishIntervalMs ?? DEFAULT_HOST_REPUBLISH_INTERVAL_MS;
 

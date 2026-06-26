@@ -76,7 +76,9 @@ export function formatOllamaSetupRequired(result, modelConfig) {
 
 async function fetchOllamaTags(host, { fetchImpl }) {
   try {
-    const response = await fetchImpl(`${host}/api/tags`);
+    const response = await fetchImpl(`${host}/api/tags`, {
+      headers: createOllamaFetchHeaders(host),
+    });
 
     if (!response.ok) {
       return {
@@ -176,4 +178,18 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function createOllamaFetchHeaders(host) {
+  return isCloudflareTunnelHost(host)
+    ? { 'bypass-tunnel-reminder': 'true' }
+    : {};
+}
+
+function isCloudflareTunnelHost(host) {
+  try {
+    return new URL(host).hostname.endsWith('.trycloudflare.com');
+  } catch {
+    return false;
+  }
 }

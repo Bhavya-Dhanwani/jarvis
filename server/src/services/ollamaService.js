@@ -53,9 +53,7 @@ export class OllamaService {
   async #loadModel() {
     const response = await fetch(`${this.config.host}/api/generate`, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
+      headers: createOllamaFetchHeaders(this.config.host),
       body: JSON.stringify({
         model: this.config.model,
         prompt: '',
@@ -178,9 +176,7 @@ function createEmptyResponseRetryMessages(messages) {
 async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, tools = [], allowToolCalls = false }) {
   const response = await fetch(`${host}/api/chat`, {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers: createOllamaFetchHeaders(host),
     body: JSON.stringify({
       model,
       messages,
@@ -436,3 +432,18 @@ function createEmptyResponseError() {
   return error;
 }
 
+
+function createOllamaFetchHeaders(host) {
+  return {
+    'content-type': 'application/json',
+    ...(isCloudflareTunnelHost(host) ? { 'bypass-tunnel-reminder': 'true' } : {}),
+  };
+}
+
+function isCloudflareTunnelHost(host) {
+  try {
+    return new URL(host).hostname.endsWith('.trycloudflare.com');
+  } catch {
+    return false;
+  }
+}

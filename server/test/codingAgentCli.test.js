@@ -154,7 +154,7 @@ test('CLI host mode publishes temporary Ollama URL and exits', async () => {
       return 'access-token';
     },
     startBestTunnel: async ({ localUrl, dataRoot: tunnelDataRoot, output }) => {
-      assert.equal(localUrl, 'http://127.0.0.1:11434');
+      assert.equal(localUrl, 'http://localhost:11434');
       assert.equal(tunnelDataRoot, dataRoot);
       output.write('Tunnel online through cloudflared: https://host.trycloudflare.com\n');
       return {
@@ -179,6 +179,111 @@ test('CLI host mode publishes temporary Ollama URL and exits', async () => {
   assert.match(tunnelOutput.join(''), /Tunnel online/);
 });
 
+// Verify host mode tunnels localhost when 127.0.0.1 is not reachable.
+test('CLI host mode uses the reachable local Ollama URL for the tunnel', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-host-localhost-'));
+  const configPath = join(dataRoot, 'config.json');
+  const authPath = join(dataRoot, 'auth.json');
+  let tunnelLocalUrl = null;
+
+  writeFileSync(configPath, JSON.stringify({
+    mode: 'host',
+    model: 'gemma4:e4b',
+    host: 'http://127.0.0.1:11434',
+    dataRoot,
+    signalingServerUrl: 'https://jarvis.example.com',
+  }));
+  writeFileSync(authPath, JSON.stringify({
+    refreshToken: 'refresh-token',
+    serverUrl: 'https://jarvis.example.com',
+  }));
+
+  const result = await runCli([], {
+    env: {
+      JARVIS_CONFIG_PATH: configPath,
+    },
+    output: () => {},
+    outputStream: {
+      write: () => {},
+    },
+    ensureOllamaReady: async ({ modelConfig }) => {
+      if (modelConfig.host === 'http://127.0.0.1:11434') {
+        return { ready: false, reason: '127 not reachable' };
+      }
+
+      return { ready: true };
+    },
+    refreshAccessToken: async () => 'access-token',
+    startBestTunnel: async ({ localUrl }) => {
+      tunnelLocalUrl = localUrl;
+      return {
+        provider: 'cloudflared',
+        url: 'https://host.trycloudflare.com',
+      };
+    },
+    publishOllamaUrl: async () => ({ success: true }),
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(tunnelLocalUrl, 'http://localhost:11434');
+});
+// Verify host mode keeps checking a slow public tunnel instead of closing.
+test('CLI host mode waits for public tunnel readiness before publishing', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-host-slow-tunnel-'));
+  const configPath = join(dataRoot, 'config.json');
+  const authPath = join(dataRoot, 'auth.json');
+  const published = [];
+  let remoteChecks = 0;
+
+  writeFileSync(configPath, JSON.stringify({
+    mode: 'host',
+    model: 'gemma4:e4b',
+    host: 'http://localhost:11434',
+    dataRoot,
+    signalingServerUrl: 'https://jarvis.example.com',
+  }));
+  writeFileSync(authPath, JSON.stringify({
+    refreshToken: 'refresh-token',
+    serverUrl: 'https://jarvis.example.com',
+  }));
+
+  const result = await runCli([], {
+    env: {
+      JARVIS_CONFIG_PATH: configPath,
+    },
+    output: () => {},
+    outputStream: {
+      write: () => {},
+    },
+    hostTunnelKeepWaiting: true,
+    hostKeepAlive: false,
+    hostTunnelVerifyPollIntervalMs: 1,
+    ensureOllamaReady: async ({ modelConfig }) => {
+      if (!modelConfig.host.startsWith('https://')) {
+        return { ready: true };
+      }
+
+      remoteChecks += 1;
+      return remoteChecks < 2
+        ? { ready: false, remote: true, reason: 'Remote Ollama host is not reachable' }
+        : { ready: true };
+    },
+    refreshAccessToken: async () => 'access-token',
+    startBestTunnel: async () => ({
+      provider: 'cloudflared',
+      url: 'https://slow.trycloudflare.com',
+    }),
+    publishOllamaUrl: async (payload) => {
+      published.push(payload);
+      return { success: true };
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.publishedUrl, 'https://slow.trycloudflare.com');
+  assert.equal(remoteChecks, 2);
+  assert.equal(published.length, 1);
+});
 // Verify host mode does not publish a tunnel URL that cannot reach Ollama.
 test('CLI host mode refuses to publish an unreachable public tunnel', async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-host-bad-tunnel-'));
