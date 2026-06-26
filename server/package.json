@@ -26,5 +26,10 @@
     "nanospinner": "^1.2.2",
     "ora": "^9.4.0",
     "prompts": "^2.4.2"
+  },
+  "overrides": {
+    "localtunnel": {
+      "axios": "^1.18.1"
+    }
   }
 }

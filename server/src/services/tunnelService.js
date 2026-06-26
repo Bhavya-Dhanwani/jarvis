@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createServer, request as httpRequest } from 'node:http';
 import { createWriteStream, existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { get } from 'node:https';
@@ -131,22 +132,83 @@ async function resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot })
 }
 
 async function startLocaltunnel({ localUrl, output, timeoutMs }) {
-  const target = new URL(localUrl);
-  const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
-  const tunnel = await withTimeout(
-    localtunnel({ port, local_host: target.hostname }),
-    timeoutMs,
-    'localtunnel',
-  );
+  // localtunnel forwards its public *.loca.lt hostname as the Host header and offers
+  // no rewrite option, so Ollama answers 403. Put a local proxy in front of Ollama
+  // that rewrites Host to the local origin, then tunnel to the proxy instead.
+  const proxy = await startHostRewriteProxy(localUrl);
+
+  let tunnel;
+
+  try {
+    tunnel = await withTimeout(
+      localtunnel({ port: proxy.port, local_host: '127.0.0.1' }),
+      timeoutMs,
+      'localtunnel',
+    );
+  } catch (error) {
+    proxy.close();
+    throw error;
+  }
 
   output.write(`Tunnel online through localtunnel: ${tunnel.url}\n`);
 
   return {
     provider: 'localtunnel',
     url: tunnel.url,
-    // Adapt localtunnel's close() to the { process: { kill } } shape callers expect.
-    process: { kill: () => tunnel.close() },
+    // Adapt localtunnel's close() to the { process: { kill } } shape callers expect,
+    // and tear down the host-rewrite proxy alongside it.
+    process: {
+      kill: () => {
+        tunnel.close();
+        proxy.close();
+      },
+    },
   };
+}
+
+// Start a local reverse proxy that forwards to `targetUrl` but rewrites the Host
+// header to the target's origin, so Host-sensitive servers (Ollama) accept requests
+// arriving through tunnels that cannot rewrite the header themselves.
+function startHostRewriteProxy(targetUrl) {
+  const target = new URL(targetUrl);
+  const targetPort = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
+
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => {
+      const proxyReq = httpRequest(
+        {
+          hostname: target.hostname,
+          port: targetPort,
+          path: req.url,
+          method: req.method,
+          headers: { ...req.headers, host: target.host },
+        },
+        (proxyRes) => {
+          res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+          proxyRes.pipe(res);
+        },
+      );
+
+      proxyReq.on('error', () => {
+        if (!res.headersSent) {
+          res.writeHead(502);
+        }
+
+        res.end();
+      });
+
+      req.pipe(proxyReq);
+    });
+
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      resolve({
+        port: address.port,
+        close: () => server.close(),
+      });
+    });
+  });
 }
 
 function withTimeout(promise, timeoutMs, label) {

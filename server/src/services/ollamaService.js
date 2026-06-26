@@ -436,13 +436,18 @@ function createEmptyResponseError() {
 function createOllamaFetchHeaders(host) {
   return {
     'content-type': 'application/json',
-    ...(isCloudflareTunnelHost(host) ? { 'bypass-tunnel-reminder': 'true' } : {}),
+    // localtunnel (loca.lt) serves an interstitial reminder page unless this header
+    // is present; harmless for the other tunnel providers.
+    ...(isPublicTunnelHost(host) ? { 'bypass-tunnel-reminder': 'true' } : {}),
   };
 }
 
-function isCloudflareTunnelHost(host) {
+function isPublicTunnelHost(host) {
   try {
-    return new URL(host).hostname.endsWith('.trycloudflare.com');
+    const { hostname } = new URL(host);
+    return hostname.endsWith('.trycloudflare.com')
+      || hostname.endsWith('.loca.lt')
+      || hostname.endsWith('.ngrok-free.app');
   } catch {
     return false;
   }
