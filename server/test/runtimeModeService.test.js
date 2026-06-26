@@ -84,3 +84,50 @@ test('client runtime fetches the latest host URL on every preparation', async ()
   assert.equal(saved.host, 'https://second.trycloudflare.com');
   assert.equal(calls.filter((call) => call.type === 'claim').length, 2);
 });
+
+test('client runtime waits for host URL instead of closing in keep-alive mode', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-client-wait-'));
+  const configPath = join(dataRoot, 'config.json');
+  const authPath = join(dataRoot, 'auth.json');
+  const messages = [];
+  let claims = 0;
+
+  writeFileSync(configPath, JSON.stringify({
+    mode: 'client',
+    model: 'gemma4:e4b',
+    host: 'https://stale.trycloudflare.com',
+    dataRoot,
+    signalingServerUrl: 'https://jarvis.example.com',
+    remoteHostTemporary: true,
+  }));
+  writeFileSync(authPath, JSON.stringify({
+    refreshToken: 'refresh-token',
+    serverUrl: 'https://jarvis.example.com',
+  }));
+
+  const result = await prepareRuntimeConfig({
+    env: {
+      JARVIS_CONFIG_PATH: configPath,
+    },
+    output: (line) => messages.push(line),
+    outputStream: { isTTY: true },
+    clientUrlPollIntervalMs: 1,
+    refreshAccessToken: async () => 'access-token',
+    claimOllamaUrl: async () => {
+      claims += 1;
+
+      return {
+        data: claims === 1
+          ? { available: false, url: null }
+          : { available: true, url: 'https://fresh.trycloudflare.com' },
+      };
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(configPath, 'utf8'));
+
+  assert.equal(result.host, 'https://fresh.trycloudflare.com');
+  assert.equal(saved.host, 'https://fresh.trycloudflare.com');
+  assert.equal(claims, 2);
+  assert.match(messages.join('\n'), /URL not available/);
+});

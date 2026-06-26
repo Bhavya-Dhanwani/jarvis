@@ -35,6 +35,9 @@ import { card, errorBox, statusLine, successBox, warningBox } from '../ui/theme.
 import { printCommands, printHelp, printVersion } from './commands.js';
 import { parseCommand } from './parser.js';
 
+const DEFAULT_CLIENT_URL_POLL_INTERVAL_MS = 3000;
+const DEFAULT_HOST_REPUBLISH_INTERVAL_MS = 30000;
+
 export async function runCli(args, context = {}) {
   // Parse CLI arguments into a supported command.
   const command = parseCommand(args);
@@ -113,19 +116,22 @@ export async function runCli(args, context = {}) {
     }
 
     // Resolve client URLs before building any model-backed service.
-    await prepareRuntimeConfig(context);
-    // Reuse an injected coding service or build the Ollama-backed workflow.
-    const codingAgentService = context.codingAgentService ?? createCodingAgentService({
-      assistantService: context.assistantService,
-      env: context.env ?? process.env,
+    const { modelConfig, readiness } = await resolveReadyRuntimeConfig({
+      context,
+      output,
+      command: 'code',
     });
-    const modelConfig = createModelConfig({ env: context.env ?? process.env });
-    const readiness = await checkOllamaReadiness(modelConfig, context);
 
     if (!readiness.ready) {
       output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
       return { status: 'setup-required', command: 'code', readiness };
     }
+
+    // Reuse an injected coding service or build the Ollama-backed workflow.
+    const codingAgentService = context.codingAgentService ?? createCodingAgentService({
+      assistantService: context.assistantService,
+      env: context.env ?? process.env,
+    });
 
     // Run the planner, workers, and review pipeline.
     const result = await codingAgentService.run(request, {
@@ -154,9 +160,11 @@ export async function runCli(args, context = {}) {
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
-    await prepareRuntimeConfig(context);
-    const modelConfig = createModelConfig({ env: context.env ?? process.env });
-    const readiness = await checkOllamaReadiness(modelConfig, context);
+    const { modelConfig, readiness } = await resolveReadyRuntimeConfig({
+      context,
+      output,
+      command: command.command,
+    });
 
     if (!readiness.ready) {
       output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
@@ -189,9 +197,11 @@ export async function runCli(args, context = {}) {
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
-    await prepareRuntimeConfig(context);
-    const modelConfig = createModelConfig({ env: context.env ?? process.env });
-    const readiness = await checkOllamaReadiness(modelConfig, context);
+    const { modelConfig, readiness } = await resolveReadyRuntimeConfig({
+      context,
+      output,
+      command: command.command,
+    });
 
     if (!readiness.ready) {
       output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
@@ -323,6 +333,12 @@ async function handleHostPublisherRuntime(context = {}) {
     dataRoot: config.dataRoot,
   });
 
+  await waitForPublishedTunnelReady({
+    context,
+    output,
+    modelConfig: { ...modelConfig, host: tunnel.url },
+  });
+
   await publish({
     serverUrl: auth.serverUrl,
     accessToken,
@@ -337,14 +353,117 @@ async function handleHostPublisherRuntime(context = {}) {
     ['Ollama URL', tunnel.url],
   ], { borderColor: 'green' }));
 
-  return {
+  const result = {
     status: 'ok',
     command: 'host',
     mode: RUNTIME_MODES.HOST,
     publishedUrl: tunnel.url,
   };
+
+  if (shouldKeepHostOnline(context)) {
+    await keepHostPublisherOnline({
+      context,
+      output,
+      publish,
+      serverUrl: auth.serverUrl,
+      accessToken,
+      tunnel,
+    });
+  }
+
+  return result;
 }
 
+async function waitForPublishedTunnelReady({ context, output, modelConfig }) {
+  if (context.verifyPublishedTunnel === false) {
+    return;
+  }
+
+  const maxAttempts = context.hostTunnelVerifyMaxAttempts ?? 8;
+  const pollIntervalMs = context.hostTunnelVerifyPollIntervalMs ?? 1000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const readiness = await checkOllamaReadiness(modelConfig, {
+      ...context,
+      ollamaStartupOptions: {
+        ...(context.ollamaStartupOptions ?? {}),
+        allowLocalStart: false,
+        timeoutMs: context.hostTunnelVerifyTimeoutMs ?? 3000,
+        pollIntervalMs: 250,
+      },
+    });
+
+    if (readiness.ready) {
+      output(statusLine('success', 'Public Ollama tunnel verified', modelConfig.host));
+      return;
+    }
+
+    output(statusLine('warning', 'Public tunnel not ready', 'waiting before publishing URL'));
+    await wait(pollIntervalMs);
+  }
+
+  output(warningBox([
+    'The host tunnel URL was created, but Jarvis could not verify Ollama through it yet.',
+    '',
+    'The URL will still be published so clients can keep retrying while the tunnel finishes connecting.',
+    `Published host: ${modelConfig.host}`,
+  ].join('\n')));
+}
+
+async function keepHostPublisherOnline({ context, output, publish, serverUrl, accessToken, tunnel }) {
+  const intervalMs = context.hostRepublishIntervalMs ?? DEFAULT_HOST_REPUBLISH_INTERVAL_MS;
+
+  output(statusLine('info', 'Host link', 'keeping tunnel published; press Ctrl+C to stop'));
+
+  await new Promise((resolve) => {
+    let stopped = false;
+    let timer = null;
+
+    const stop = () => {
+      if (stopped) {
+        return;
+      }
+
+      stopped = true;
+      clearTimeout(timer);
+      tunnel.process?.kill?.();
+      output(statusLine('warning', 'Host link stopped', 'tunnel process closed'));
+      resolve();
+    };
+
+    const tick = async () => {
+      if (stopped) {
+        return;
+      }
+
+      try {
+        await publish({
+          serverUrl,
+          accessToken,
+          ollamaUrl: tunnel.url,
+        });
+        output(statusLine('success', 'Host URL refreshed', tunnel.url));
+      } catch (error) {
+        output(statusLine('warning', 'Host refresh failed', error.message));
+      }
+
+      timer = setTimeout(tick, intervalMs);
+    };
+
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    timer = setTimeout(tick, intervalMs);
+  });
+}
+
+function shouldKeepHostOnline(context = {}) {
+  if (typeof context.hostKeepAlive === 'boolean') {
+    return context.hostKeepAlive;
+  }
+
+  const outputStream = context.outputStream ?? process.stdout;
+  return outputStream.isTTY === true;
+}
 export async function prepareRuntimeConfig(context = {}) {
   const env = context.env ?? process.env;
   const config = loadJarvisConfig({ env });
@@ -368,30 +487,97 @@ export async function prepareRuntimeConfig(context = {}) {
 
   const refresh = context.refreshAccessToken ?? refreshAccessToken;
   const claim = context.claimOllamaUrl ?? claimOllamaUrl;
+  const output = context.output ?? console.log;
+  const keepWaiting = shouldKeepClientWaiting(context);
+  const maxAttempts = keepWaiting ? Infinity : (context.clientUrlMaxAttempts ?? 1);
+  const pollIntervalMs = context.clientUrlPollIntervalMs ?? DEFAULT_CLIENT_URL_POLL_INTERVAL_MS;
   const accessToken = await refresh({
     serverUrl: auth.serverUrl,
     refreshToken: auth.refreshToken,
   });
-  const claimed = await claim({
-    serverUrl: auth.serverUrl,
-    accessToken,
-  });
-  const url = claimed.data?.url;
 
-  if (!url) {
-    throw new Error('URL not available. Waiting for the host to provide one. Start the host, then run Jarvis again.');
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const claimed = await claim({
+        serverUrl: auth.serverUrl,
+        accessToken,
+      });
+      const url = claimed.data?.url;
+
+      if (url) {
+        await saveJarvisConfig({
+          dataRoot: config.dataRoot,
+          mode: RUNTIME_MODES.CLIENT,
+          model: config.model,
+          host: url,
+          signalingServerUrl: auth.serverUrl,
+          remoteHostTemporary: true,
+        });
+
+        return { ...config, host: url };
+      }
+
+      if (attempt >= maxAttempts) {
+        throw new Error('URL not available. Waiting for the host to provide one. Start the host, then run Jarvis again.');
+      }
+
+      output(statusLine('warning', 'URL not available', 'waiting for the host to publish one'));
+    } catch (error) {
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+
+      output(statusLine('warning', 'Server claim failed', error.message));
+    }
+
+    await wait(pollIntervalMs);
   }
 
-  await saveJarvisConfig({
-    dataRoot: config.dataRoot,
-    mode: RUNTIME_MODES.CLIENT,
-    model: config.model,
-    host: url,
-    signalingServerUrl: auth.serverUrl,
-    remoteHostTemporary: true,
-  });
+  return config;
+}
 
-  return { ...config, host: url };
+async function resolveReadyRuntimeConfig({ context, output, command }) {
+  const keepWaiting = shouldKeepClientWaiting(context);
+  const maxAttempts = keepWaiting ? Infinity : (context.remoteOllamaMaxAttempts ?? 1);
+  const pollIntervalMs = context.remoteOllamaPollIntervalMs ?? DEFAULT_CLIENT_URL_POLL_INTERVAL_MS;
+  let last = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await prepareRuntimeConfig(context);
+    const modelConfig = createModelConfig({ env: context.env ?? process.env });
+    const readiness = await checkOllamaReadiness(modelConfig, context);
+
+    if (readiness.ready) {
+      return { modelConfig, readiness };
+    }
+
+    last = { modelConfig, readiness };
+
+    if (!readiness.remote || attempt >= maxAttempts) {
+      return last;
+    }
+
+    if (attempt === 1) {
+      output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
+    }
+
+    output(statusLine('warning', 'Remote Ollama unreachable', 'waiting for host to republish a working URL'));
+    await wait(pollIntervalMs);
+  }
+
+  return last ?? {
+    modelConfig: createModelConfig({ env: context.env ?? process.env }),
+    readiness: { ready: false, reason: `Jarvis could not prepare runtime for ${command}.` },
+  };
+}
+
+function shouldKeepClientWaiting(context = {}) {
+  if (typeof context.clientKeepAlive === 'boolean') {
+    return context.clientKeepAlive;
+  }
+
+  const outputStream = context.outputStream ?? process.stdout;
+  return outputStream.isTTY === true;
 }
 
 async function checkOllamaReadiness(modelConfig, context = {}) {
@@ -409,6 +595,11 @@ async function checkOllamaReadiness(modelConfig, context = {}) {
   });
 }
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 // Render coding workflow events through line output.
 function renderCodingEvent(event, output) {
   if (event.type === 'workflow.planned') {

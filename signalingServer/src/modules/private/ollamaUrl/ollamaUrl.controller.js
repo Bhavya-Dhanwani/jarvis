@@ -8,6 +8,7 @@ const publishSchema = z.object({
 });
 
 let currentOllamaUrl = null;
+let lastClientRequestAt = null;
 
 export const publishOllamaUrl = asyncWrapper(async (req, res) => {
     const parsed = publishSchema.safeParse(req.body);
@@ -26,14 +27,19 @@ export const publishOllamaUrl = asyncWrapper(async (req, res) => {
         available: true,
         url: currentOllamaUrl.url,
         publishedAt: currentOllamaUrl.publishedAt,
+        lastClientRequestAt,
     });
 });
 
 export const claimOllamaUrl = asyncWrapper(async (_req, res) => {
+    lastClientRequestAt = new Date().toISOString();
+
     if (!currentOllamaUrl?.url) {
         return ApiResponse(res, 200, "URL not available. Waiting for the host to provide one.", {
             available: false,
             url: null,
+            needsHost: true,
+            requestedAt: lastClientRequestAt,
         });
     }
 
@@ -41,5 +47,6 @@ export const claimOllamaUrl = asyncWrapper(async (_req, res) => {
         available: true,
         url: currentOllamaUrl.url,
         publishedAt: currentOllamaUrl.publishedAt,
+        requestedAt: lastClientRequestAt,
     });
 });
