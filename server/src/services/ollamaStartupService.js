@@ -9,6 +9,7 @@ export async function ensureOllamaReady({
   fetchImpl = globalThis.fetch,
   timeoutMs = DEFAULT_START_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+  allowLocalStart = isLocalOllamaHost(modelConfig?.host),
 } = {}) {
   if (!modelConfig?.host || !modelConfig?.model) {
     return missingSetup('Ollama model configuration is missing.');
@@ -17,6 +18,13 @@ export async function ensureOllamaReady({
   const initial = await fetchOllamaTags(modelConfig.host, { fetchImpl });
 
   if (!initial.available) {
+    if (!allowLocalStart) {
+      return missingSetup(`Remote Ollama host is not reachable: ${modelConfig.host}`, {
+        remote: true,
+        host: modelConfig.host,
+      });
+    }
+
     const started = await startServer();
 
     if (!started.started) {
@@ -41,6 +49,20 @@ export async function ensureOllamaReady({
 
 export function formatOllamaSetupRequired(result, modelConfig) {
   const reason = result?.reason ?? 'Ollama is not ready.';
+
+  if (result?.remote) {
+    return [
+      `${reason}`,
+      '',
+      'On the host device, run:',
+      '  jarvis',
+      '',
+      'That keeps the tunnel published for this client.',
+      '',
+      `Configured remote host: ${modelConfig?.host ?? 'not configured'}`,
+      `Configured model: ${modelConfig?.model ?? 'not configured'}`,
+    ].join('\n');
+  }
 
   return [
     `${reason}`,
@@ -111,12 +133,22 @@ function checkModel(models, selectedModel) {
   return missingSetup(`Configured Ollama model is not installed: ${selectedModel}`);
 }
 
-function missingSetup(reason) {
+function missingSetup(reason, extra = {}) {
   return {
     ready: false,
     started: false,
     reason,
+    ...extra,
   };
+}
+
+function isLocalOllamaHost(host) {
+  try {
+    const parsed = new URL(host);
+    return ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function startOllamaServer() {

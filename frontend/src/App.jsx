@@ -72,7 +72,7 @@ function App() {
         accessToken,
         body: { url: ollamaUrl },
       })
-      setStatus({ tone: 'ok', message: 'Host URL published. The next client claim will receive it once.' })
+      setStatus({ tone: 'ok', message: 'Host URL published. Clients can fetch the latest URL whenever they run.' })
     } catch (error) {
       setStatus({ tone: 'error', message: error.message })
     }
@@ -94,7 +94,7 @@ function App() {
       }
 
       setOllamaUrl(response.data.url)
-      setStatus({ tone: 'ok', message: `Claimed temporary URL: ${response.data.url}` })
+      setStatus({ tone: 'ok', message: `Current temporary URL: ${response.data.url}` })
     } catch (error) {
       setStatus({ tone: 'error', message: error.message })
     }

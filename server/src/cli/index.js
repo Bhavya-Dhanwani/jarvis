@@ -112,12 +112,13 @@ export async function runCli(args, context = {}) {
       throw new Error('Coding request is required.\nUsage: jarvis code "<request>"');
     }
 
+    // Resolve client URLs before building any model-backed service.
+    await prepareRuntimeConfig(context);
     // Reuse an injected coding service or build the Ollama-backed workflow.
     const codingAgentService = context.codingAgentService ?? createCodingAgentService({
       assistantService: context.assistantService,
       env: context.env ?? process.env,
     });
-    await prepareRuntimeConfig(context);
     const modelConfig = createModelConfig({ env: context.env ?? process.env });
     const readiness = await checkOllamaReadiness(modelConfig, context);
 
@@ -344,15 +345,11 @@ async function handleHostPublisherRuntime(context = {}) {
   };
 }
 
-async function prepareRuntimeConfig(context = {}) {
+export async function prepareRuntimeConfig(context = {}) {
   const env = context.env ?? process.env;
   const config = loadJarvisConfig({ env });
 
   if (config?.mode !== RUNTIME_MODES.CLIENT) {
-    return config;
-  }
-
-  if (config?.remoteHostTemporary && config?.host) {
     return config;
   }
 
@@ -369,11 +366,13 @@ async function prepareRuntimeConfig(context = {}) {
     throw new Error('Client mode needs auth. Run "jarvis setup" or "jarvis change" and login first.');
   }
 
-  const accessToken = await refreshAccessToken({
+  const refresh = context.refreshAccessToken ?? refreshAccessToken;
+  const claim = context.claimOllamaUrl ?? claimOllamaUrl;
+  const accessToken = await refresh({
     serverUrl: auth.serverUrl,
     refreshToken: auth.refreshToken,
   });
-  const claimed = await claimOllamaUrl({
+  const claimed = await claim({
     serverUrl: auth.serverUrl,
     accessToken,
   });

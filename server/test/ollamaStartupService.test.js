@@ -66,3 +66,29 @@ test('ollama startup check asks for setup when model is missing', async () => {
   assert.match(result.reason, /missing-model/);
   assert.match(formatOllamaSetupRequired(result, modelConfig), /jarvis setup/);
 });
+
+test('ollama startup check does not start local server for remote hosts', async () => {
+  const modelConfig = {
+    host: 'https://client-host.trycloudflare.com',
+    model: 'gemma4:e4b',
+  };
+  let starts = 0;
+  const result = await ensureOllamaReady({
+    modelConfig,
+    startServer: async () => {
+      starts += 1;
+      return { started: true };
+    },
+    fetchImpl: async () => {
+      throw new Error('remote tunnel down');
+    },
+  });
+  const message = formatOllamaSetupRequired(result, modelConfig);
+
+  assert.equal(starts, 0);
+  assert.equal(result.ready, false);
+  assert.equal(result.remote, true);
+  assert.match(message, /On the host device/);
+  assert.match(message, /jarvis/);
+  assert.doesNotMatch(message, /install\/start Ollama/);
+});

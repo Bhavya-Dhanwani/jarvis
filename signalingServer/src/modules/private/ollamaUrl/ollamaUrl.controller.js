@@ -7,7 +7,7 @@ const publishSchema = z.object({
     url: z.string().url("Please provide a valid Ollama URL"),
 });
 
-let pendingOllamaUrl = null;
+let currentOllamaUrl = null;
 
 export const publishOllamaUrl = asyncWrapper(async (req, res) => {
     const parsed = publishSchema.safeParse(req.body);
@@ -16,7 +16,7 @@ export const publishOllamaUrl = asyncWrapper(async (req, res) => {
         throw new ApiError(400, parsed.error.issues[0].message);
     }
 
-    pendingOllamaUrl = {
+    currentOllamaUrl = {
         url: parsed.data.url,
         userId: req.user.id,
         publishedAt: new Date().toISOString(),
@@ -24,25 +24,22 @@ export const publishOllamaUrl = asyncWrapper(async (req, res) => {
 
     return ApiResponse(res, 200, "Ollama URL published", {
         available: true,
-        url: pendingOllamaUrl.url,
-        publishedAt: pendingOllamaUrl.publishedAt,
+        url: currentOllamaUrl.url,
+        publishedAt: currentOllamaUrl.publishedAt,
     });
 });
 
 export const claimOllamaUrl = asyncWrapper(async (_req, res) => {
-    if (!pendingOllamaUrl?.url) {
+    if (!currentOllamaUrl?.url) {
         return ApiResponse(res, 200, "URL not available. Waiting for the host to provide one.", {
             available: false,
             url: null,
         });
     }
 
-    const claimed = pendingOllamaUrl;
-    pendingOllamaUrl = null;
-
-    return ApiResponse(res, 200, "Ollama URL claimed", {
+    return ApiResponse(res, 200, "Ollama URL available", {
         available: true,
-        url: claimed.url,
-        publishedAt: claimed.publishedAt,
+        url: currentOllamaUrl.url,
+        publishedAt: currentOllamaUrl.publishedAt,
     });
 });
