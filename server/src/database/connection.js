@@ -1,9 +1,9 @@
 // Import mkdirSync to ensure the database folder exists.
 import { mkdirSync } from 'node:fs';
+// Import createRequire so the experimental SQLite module can be loaded lazily.
+import { createRequire } from 'node:module';
 // Import path helpers for safe absolute paths.
 import { dirname, resolve } from 'node:path';
-// Import Node's built-in synchronous SQLite driver.
-import { DatabaseSync } from 'node:sqlite';
 // Import fileURLToPath to convert module URLs into paths.
 import { fileURLToPath } from 'node:url';
 // Import SQL schema statements.
@@ -13,6 +13,9 @@ import { schemaStatements } from './schema.js';
 const SERVER_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // Define the default SQLite database path.
 const DEFAULT_DATABASE_PATH = resolve(SERVER_ROOT, 'data', 'jarvis.sqlite');
+// Build a CommonJS require for Node built-ins that need controlled loading.
+const require = createRequire(import.meta.url);
+let DatabaseSyncClass = null;
 
 // Resolve the active database path.
 export function getDatabasePath() {
@@ -26,11 +29,38 @@ export function createDatabase(databasePath = getDatabasePath()) {
   mkdirSync(dirname(databasePath), { recursive: true });
 
   // Open the SQLite database.
-  const database = new DatabaseSync(databasePath);
+  const database = new (loadDatabaseSync())(databasePath);
   // Enable foreign key constraints.
   database.exec('PRAGMA foreign_keys = ON');
   // Return the database connection.
   return database;
+}
+
+function loadDatabaseSync() {
+  if (DatabaseSyncClass) {
+    return DatabaseSyncClass;
+  }
+
+  const originalEmitWarning = process.emitWarning;
+
+  process.emitWarning = function emitWarningWithoutSqliteExperimentalNoise(warning, ...args) {
+    const message = typeof warning === 'string' ? warning : warning?.message;
+    const type = typeof args[0] === 'string' ? args[0] : warning?.name;
+
+    if (type === 'ExperimentalWarning' && /SQLite is an experimental feature/i.test(message ?? '')) {
+      return undefined;
+    }
+
+    return originalEmitWarning.call(this, warning, ...args);
+  };
+
+  try {
+    ({ DatabaseSync: DatabaseSyncClass } = require('node:sqlite'));
+  } finally {
+    process.emitWarning = originalEmitWarning;
+  }
+
+  return DatabaseSyncClass;
 }
 
 // Apply database schema migrations.

@@ -18,7 +18,12 @@ import {
 import { OllamaService } from '../services/ollamaService.js';
 import { createWorkspaceCommandService } from '../services/workspaceCommandService.js';
 import { runChangeWizard, runSetupWizard } from '../setup/setupWizard.js';
-import { claimOllamaUrl, refreshAccessToken } from '../services/authClientService.js';
+import {
+  claimOllamaUrl,
+  publishOllamaUrl,
+  refreshAccessToken,
+} from '../services/authClientService.js';
+import { startBestTunnel } from '../services/tunnelService.js';
 import {
   RUNTIME_MODES,
   loadAuth,
@@ -26,7 +31,7 @@ import {
   saveJarvisConfig,
 } from '../services/runtimeModeService.js';
 import { renderDoctorReport } from '../ui/doctor.js';
-import { warningBox } from '../ui/theme.js';
+import { card, errorBox, statusLine, successBox, warningBox } from '../ui/theme.js';
 import { printCommands, printHelp, printVersion } from './commands.js';
 import { parseCommand } from './parser.js';
 
@@ -139,6 +144,12 @@ export async function runCli(args, context = {}) {
 
   // Handle new chat command.
   if (command.command === 'new') {
+    const hostResult = await handleHostPublisherRuntime(context);
+
+    if (hostResult) {
+      return hostResult;
+    }
+
     // Open or reuse the runtime database.
     const database = context.database ?? await createRuntimeDatabase();
     // Resolve the model once so display and requests stay aligned.
@@ -230,11 +241,125 @@ export async function runCli(args, context = {}) {
   throw new Error(`Unsupported command: ${command.command}`);
 }
 
+export function renderCliError(error) {
+  const message = error?.message || 'Jarvis failed with an unknown error.';
+  const detail = normalizeCliErrorMessage(message);
+
+  return errorBox(detail);
+}
+
+function normalizeCliErrorMessage(message) {
+  if (/^Client mode needs auth\./.test(message)) {
+    return [
+      'Client mode is missing saved auth.',
+      '',
+      'Run `jarvis setup` or `jarvis change` and login again.',
+      'If you selected a custom data drive, Jarvis will now look beside that config automatically.',
+    ].join('\n');
+  }
+
+  if (/^Host mode needs auth\./.test(message)) {
+    return [
+      'Host mode is missing saved auth.',
+      '',
+      'Run `jarvis setup` or `jarvis change`, choose Host mode, and login again.',
+    ].join('\n');
+  }
+
+  if (/^URL not available\./.test(message)) {
+    return [
+      'No temporary host URL is available yet.',
+      '',
+      'Start Jarvis in Host mode on the machine running Ollama, then run this command again.',
+    ].join('\n');
+  }
+
+  if (/fetch failed/i.test(message)) {
+    return [
+      'Jarvis could not reach the configured server.',
+      '',
+      'Check that the signaling server URL is correct and reachable, then run `jarvis setup` or `jarvis change` again if needed.',
+    ].join('\n');
+  }
+
+  return message;
+}
+
+async function handleHostPublisherRuntime(context = {}) {
+  const env = context.env ?? process.env;
+  const config = loadJarvisConfig({ env });
+
+  if (config?.mode !== RUNTIME_MODES.HOST) {
+    return null;
+  }
+
+  const output = context.output ?? console.log;
+  const outputStream = context.outputStream ?? process.stdout;
+  const modelConfig = createModelConfig({ env });
+  const readiness = await checkOllamaReadiness(modelConfig, context);
+
+  if (!readiness.ready) {
+    output(warningBox(formatOllamaSetupRequired(readiness, modelConfig)));
+    return { status: 'setup-required', command: 'host', readiness };
+  }
+
+  const auth = loadAuth({ env });
+
+  if (!auth?.refreshToken || !auth?.serverUrl) {
+    throw new Error('Host mode needs auth. Run "jarvis setup" or "jarvis change" and login first.');
+  }
+
+  const refresh = context.refreshAccessToken ?? refreshAccessToken;
+  const publish = context.publishOllamaUrl ?? publishOllamaUrl;
+  const openTunnel = context.startBestTunnel ?? startBestTunnel;
+  const accessToken = await refresh({
+    serverUrl: auth.serverUrl,
+    refreshToken: auth.refreshToken,
+  });
+  const tunnel = await openTunnel({
+    localUrl: modelConfig.host,
+    output: outputStream,
+    dataRoot: config.dataRoot,
+  });
+
+  await publish({
+    serverUrl: auth.serverUrl,
+    accessToken,
+    ollamaUrl: tunnel.url,
+  });
+
+  output(successBox('Host mode is online. Temporary Ollama URL published to the server.'));
+  output(statusLine('success', 'Published URL', tunnel.url));
+  output(card('HOST LINK', [
+    ['Server', auth.serverUrl],
+    ['Provider', tunnel.provider],
+    ['Ollama URL', tunnel.url],
+  ], { borderColor: 'green' }));
+
+  return {
+    status: 'ok',
+    command: 'host',
+    mode: RUNTIME_MODES.HOST,
+    publishedUrl: tunnel.url,
+  };
+}
+
 async function prepareRuntimeConfig(context = {}) {
   const env = context.env ?? process.env;
   const config = loadJarvisConfig({ env });
 
   if (config?.mode !== RUNTIME_MODES.CLIENT) {
+    return config;
+  }
+
+  if (config?.remoteHostTemporary && config?.host) {
+    return config;
+  }
+
+  if (context.assistantService
+    || context.codingAgentService
+    || context.database
+    || context.ensureOllamaReady) {
     return config;
   }
 

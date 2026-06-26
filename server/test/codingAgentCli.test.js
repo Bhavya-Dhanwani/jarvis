@@ -1,13 +1,13 @@
 // Import strict assertions for tests.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // Import Node's built-in test runner.
 import test from 'node:test';
 // Import the CLI runner under test.
-import { runCli } from '../src/cli/index.js';
+import { renderCliError, runCli } from '../src/cli/index.js';
 // Import the coding agent service under test.
 import { createCodingAgentService } from '../src/services/codingAgentService.js';
 import { createWorkspaceToolService } from '../src/services/workspaceToolService.js';
@@ -108,6 +108,75 @@ test('CLI code command asks for setup when Ollama is not ready', async () => {
 
   assert.equal(result.status, 'setup-required');
   assert.match(lines.join('\n'), /jarvis setup/);
+});
+
+// Verify fatal CLI errors are action-oriented instead of raw thrown text.
+test('CLI fatal auth errors render with setup guidance', () => {
+  const output = renderCliError(new Error('Client mode needs auth. Run "jarvis setup" or "jarvis change" and login first.'));
+
+  assert.match(output, /Client mode is missing saved auth/);
+  assert.match(output, /jarvis setup/);
+});
+
+// Verify host mode publishes the URL instead of opening the chat UI.
+test('CLI host mode publishes temporary Ollama URL and exits', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-host-'));
+  const configPath = join(dataRoot, 'config.json');
+  const authPath = join(dataRoot, 'auth.json');
+  const lines = [];
+  const tunnelOutput = [];
+  const published = [];
+
+  writeFileSync(configPath, JSON.stringify({
+    mode: 'host',
+    model: 'gemma4:e4b',
+    host: 'http://localhost:11434',
+    dataRoot,
+    signalingServerUrl: 'https://jarvis.example.com',
+  }));
+  writeFileSync(authPath, JSON.stringify({
+    refreshToken: 'refresh-token',
+    serverUrl: 'https://jarvis.example.com',
+  }));
+
+  const result = await runCli([], {
+    env: {
+      JARVIS_CONFIG_PATH: configPath,
+    },
+    output: (line) => lines.push(line),
+    outputStream: {
+      write: (chunk) => tunnelOutput.push(String(chunk)),
+    },
+    ensureOllamaReady: async () => ({ ready: true }),
+    refreshAccessToken: async ({ serverUrl, refreshToken }) => {
+      assert.equal(serverUrl, 'https://jarvis.example.com');
+      assert.equal(refreshToken, 'refresh-token');
+      return 'access-token';
+    },
+    startBestTunnel: async ({ localUrl, dataRoot: tunnelDataRoot, output }) => {
+      assert.equal(localUrl, 'http://localhost:11434');
+      assert.equal(tunnelDataRoot, dataRoot);
+      output.write('Tunnel online through cloudflared: https://host.trycloudflare.com\n');
+      return {
+        provider: 'cloudflared',
+        url: 'https://host.trycloudflare.com',
+      };
+    },
+    publishOllamaUrl: async (payload) => {
+      published.push(payload);
+      return { success: true };
+    },
+  });
+
+  assert.equal(result.command, 'host');
+  assert.equal(result.publishedUrl, 'https://host.trycloudflare.com');
+  assert.deepEqual(published, [{
+    serverUrl: 'https://jarvis.example.com',
+    accessToken: 'access-token',
+    ollamaUrl: 'https://host.trycloudflare.com',
+  }]);
+  assert.match(lines.join('\n'), /Host mode is online/);
+  assert.match(tunnelOutput.join(''), /Tunnel online/);
 });
 
 // Verify model-backed workers feed completed outputs into review.

@@ -89,7 +89,17 @@ export async function saveJarvisConfig({
 }
 
 export function loadAuth({ env = process.env } = {}) {
-  return readJson(env.JARVIS_AUTH_PATH ?? getDefaultAuthPath());
+  const paths = getAuthCandidates({ env });
+
+  for (const path of paths) {
+    const auth = readJson(path);
+
+    if (auth) {
+      return { ...auth, path };
+    }
+  }
+
+  return null;
 }
 
 export async function saveAuth({ refreshToken, accessToken, user, serverUrl, dataRoot = DEFAULT_DATA_ROOT }) {
@@ -127,6 +137,34 @@ function getConfigCandidates({ env }) {
   if (platform() === 'win32') {
     for (const letter of 'CDEFGHIJKLMNOPQRSTUVWXYZ') {
       candidates.push(`${letter}:\\Jarvis\\data\\${CONFIG_FILE}`);
+    }
+  }
+
+  return [...new Set(candidates)];
+}
+
+function getAuthCandidates({ env }) {
+  if (env.JARVIS_AUTH_PATH) {
+    return [env.JARVIS_AUTH_PATH];
+  }
+
+  const candidates = [];
+
+  if (env.JARVIS_DATA_ROOT) {
+    candidates.push(join(env.JARVIS_DATA_ROOT, AUTH_FILE));
+  }
+
+  const activeConfig = loadJarvisConfig({ env });
+
+  if (activeConfig?.dataRoot) {
+    candidates.push(join(activeConfig.dataRoot, AUTH_FILE));
+  }
+
+  candidates.push(getDefaultAuthPath());
+
+  if (platform() === 'win32') {
+    for (const letter of 'CDEFGHIJKLMNOPQRSTUVWXYZ') {
+      candidates.push(`${letter}:\\Jarvis\\data\\${AUTH_FILE}`);
     }
   }
 
