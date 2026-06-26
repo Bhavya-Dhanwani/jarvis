@@ -75,6 +75,37 @@ export class PromptSession {
     return String(response.value ?? defaultValue ?? '').trim();
   }
 
+  async secret(question, { validate } = {}) {
+    if (this.readline) {
+      while (true) {
+        const answer = (await this.readline.question(`${question}: `)).trim();
+        const error = validate?.(answer);
+
+        if (!error) {
+          return answer;
+        }
+
+        this.output.write(`${error}\n`);
+      }
+    }
+
+    const response = await prompts({
+      type: 'password',
+      name: 'value',
+      message: theme.primary(question),
+      validate(value) {
+        const answer = String(value ?? '').trim();
+        return validate?.(answer) || true;
+      },
+    }, {
+      stdin: this.input,
+      stdout: this.output,
+      onCancel: () => ({ value: '' }),
+    });
+
+    return String(response.value ?? '').trim();
+  }
+
   async select(question, choices, { initial = 0 } = {}) {
     if (this.readline) {
       return choices[initial]?.value;

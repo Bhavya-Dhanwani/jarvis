@@ -1,16 +1,16 @@
 import { saveAuth } from './runtimeModeService.js';
 
 export async function authenticateWithServer({ prompts, output, defaultServerUrl, dataRoot }) {
-  const serverUrl = await prompts.ask('Auth/server URL', {
-    defaultValue: defaultServerUrl,
-    hint: 'Use the same signaling server URL on the host and client.',
-  });
+  const serverUrl = normalizeServerUrl(defaultServerUrl);
+  output.write(`Using auth/server URL: ${serverUrl}\n`);
   const mode = await prompts.select('Authenticate with Jarvis server', [
     { title: 'Login', description: 'Use an existing Jarvis account.', value: 'login' },
     { title: 'Register', description: 'Create a new Jarvis account.', value: 'register' },
   ]);
   const email = await prompts.ask('Email');
-  const password = await prompts.ask('Password');
+  const password = await prompts.secret('Password', {
+    validate: (value) => (value ? null : 'Password is required.'),
+  });
   const name = mode === 'register'
     ? await prompts.ask('Name')
     : undefined;
@@ -44,6 +44,16 @@ export async function authenticateWithServer({ prompts, output, defaultServerUrl
     refreshToken: tokens.refreshToken,
     user: response.data?.user,
   };
+}
+
+function normalizeServerUrl(serverUrl) {
+  const normalized = String(serverUrl ?? '').trim().replace(/\/+$/, '');
+
+  if (!normalized) {
+    throw new Error('Auth/server URL is missing. Set JARVIS_SIGNALING_SERVER_URL before running setup.');
+  }
+
+  return normalized;
 }
 
 export async function refreshAccessToken({ serverUrl, refreshToken }) {

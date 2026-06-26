@@ -69,7 +69,7 @@ export async function runSetupWizard({
     const savedConfig = loadJarvisConfig({ env });
     const defaultServerUrl = env.JARVIS_SIGNALING_SERVER_URL
       ?? savedConfig?.signalingServerUrl
-      ?? 'http://localhost:5000';
+      ?? 'https://jarvis-ervq.onrender.com';
 
     if (mode === RUNTIME_MODES.CLIENT) {
       return await runClientSetup({ prompts, output, env, defaultServerUrl });
@@ -119,7 +119,7 @@ export async function runSetupWizard({
       signalingServerUrl = auth.serverUrl;
       const tunnel = await withSpinner(
         'Opening public Ollama tunnel',
-        () => startBestTunnel({ localUrl: OLLAMA_HOST, output }),
+        () => startBestTunnel({ localUrl: OLLAMA_HOST, output, dataRoot }),
         { output },
       );
       publicOllamaUrl = tunnel.url;
@@ -204,7 +204,7 @@ export async function runChangeWizard({
     const dataRoot = savedConfig?.dataRoot ?? getDefaultDataRoot();
     const defaultServerUrl = env.JARVIS_SIGNALING_SERVER_URL
       ?? savedConfig?.signalingServerUrl
-      ?? 'http://localhost:5000';
+      ?? 'https://jarvis-ervq.onrender.com';
 
     if (mode === RUNTIME_MODES.CLIENT) {
       return await runClientSetup({ prompts, output, env, defaultServerUrl });
@@ -219,7 +219,7 @@ export async function runChangeWizard({
       });
       const tunnel = await withSpinner(
         'Opening public Ollama tunnel',
-        () => startBestTunnel({ localUrl: OLLAMA_HOST, output }),
+        () => startBestTunnel({ localUrl: OLLAMA_HOST, output, dataRoot }),
         { output },
       );
       await withSpinner(
