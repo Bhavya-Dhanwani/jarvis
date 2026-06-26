@@ -39,8 +39,9 @@ export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
     },
     // Keep the model loaded according to the detected system profile.
     keepAlive: env.JARVIS_OLLAMA_KEEP_ALIVE ?? tuning.keepAlive,
-    // Warm-up should release quickly; real prompts still use keepAlive above.
-    warmKeepAlive: env.JARVIS_OLLAMA_WARM_KEEP_ALIVE ?? '30s',
+    // Keep the warmed model resident for the same window as real prompts, so the
+    // first message after start-up is fast instead of paying a fresh cold load.
+    warmKeepAlive: env.JARVIS_OLLAMA_WARM_KEEP_ALIVE ?? tuning.keepAlive,
     // Allow long answers to keep streaming through several bounded requests.
     maxAutoContinuations: Number(env.JARVIS_OLLAMA_MAX_CONTINUATIONS ?? tuning.maxAutoContinuations),
     // Use gentle background warm-up by default; set JARVIS_OLLAMA_WARMUP=false to disable.

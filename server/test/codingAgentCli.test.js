@@ -153,6 +153,7 @@ test('CLI host mode publishes temporary Ollama URL and exits', async () => {
       assert.equal(refreshToken, 'refresh-token');
       return 'access-token';
     },
+    warmLocalModel: async () => true,
     startBestTunnel: async ({ localUrl, dataRoot: tunnelDataRoot, output }) => {
       assert.equal(localUrl, 'http://localhost:11434');
       assert.equal(tunnelDataRoot, dataRoot);
@@ -214,6 +215,7 @@ test('CLI host mode uses the reachable local Ollama URL for the tunnel', async (
       return { ready: true };
     },
     refreshAccessToken: async () => 'access-token',
+    warmLocalModel: async () => true,
     startBestTunnel: async ({ localUrl }) => {
       tunnelLocalUrl = localUrl;
       return {
@@ -269,6 +271,7 @@ test('CLI host mode waits for public tunnel readiness before publishing', async 
         : { ready: true };
     },
     refreshAccessToken: async () => 'access-token',
+    warmLocalModel: async () => true,
     startBestTunnel: async () => ({
       provider: 'cloudflared',
       url: 'https://slow.trycloudflare.com',
@@ -319,6 +322,7 @@ test('CLI host mode refuses to publish an unreachable public tunnel', async () =
     hostTunnelVerifyMaxAttempts: 1,
     hostTunnelVerifyPollIntervalMs: 1,
     refreshAccessToken: async () => 'access-token',
+    warmLocalModel: async () => true,
     startBestTunnel: async () => ({
       provider: 'cloudflared',
       url: 'https://bad.trycloudflare.com',
@@ -332,6 +336,54 @@ test('CLI host mode refuses to publish an unreachable public tunnel', async () =
   assert.equal(result.status, 'tunnel-unreachable');
   assert.equal(result.publishedUrl, null);
   assert.deepEqual(published, []);
+});
+// Verify the host loads the model locally before exposing the public URL.
+test('CLI host mode warms the local model before publishing the URL', async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'jarvis-host-warm-'));
+  const configPath = join(dataRoot, 'config.json');
+  const authPath = join(dataRoot, 'auth.json');
+  const order = [];
+
+  writeFileSync(configPath, JSON.stringify({
+    mode: 'host',
+    model: 'gemma4:e4b',
+    host: 'http://localhost:11434',
+    dataRoot,
+    signalingServerUrl: 'https://jarvis.example.com',
+  }));
+  writeFileSync(authPath, JSON.stringify({
+    refreshToken: 'refresh-token',
+    serverUrl: 'https://jarvis.example.com',
+  }));
+
+  const result = await runCli([], {
+    env: {
+      JARVIS_CONFIG_PATH: configPath,
+    },
+    output: () => {},
+    outputStream: {
+      write: () => {},
+    },
+    ensureOllamaReady: async () => ({ ready: true }),
+    refreshAccessToken: async () => 'access-token',
+    warmLocalModel: async (modelConfig) => {
+      order.push(`warm:${modelConfig.host}:${modelConfig.model}`);
+      return true;
+    },
+    startBestTunnel: async () => ({
+      provider: 'cloudflared',
+      url: 'https://host.trycloudflare.com',
+    }),
+    publishOllamaUrl: async () => {
+      order.push('publish');
+      return { success: true };
+    },
+  });
+
+  assert.equal(result.status, 'ok');
+  // The local model must be warmed (against the local host, not the tunnel URL)
+  // strictly before the URL is published.
+  assert.deepEqual(order, ['warm:http://localhost:11434:gemma4:e4b', 'publish']);
 });
 // Verify model-backed workers feed completed outputs into review.
 test('coding agent service runs specialist agents and reviews their outputs', async () => {

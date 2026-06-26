@@ -356,6 +356,15 @@ async function handleHostPublisherRuntime(context = {}) {
     };
   }
 
+  // Load the model into memory locally BEFORE publishing the URL, so the first
+  // client request through the tunnel is answered immediately instead of triggering
+  // a cold load that outlasts the tunnel's request timeout (a client-side 408).
+  const warm = context.warmLocalModel ?? warmLocalModel;
+  const warmed = await warm(hostModelConfig);
+  output(warmed
+    ? statusLine('success', 'Model warm', `${hostModelConfig.model} loaded and kept resident`)
+    : statusLine('warning', 'Model warm-up skipped', 'first request may be slow while the model loads'));
+
   await publish({
     serverUrl: auth.serverUrl,
     accessToken,
@@ -385,6 +394,7 @@ async function handleHostPublisherRuntime(context = {}) {
       serverUrl: auth.serverUrl,
       accessToken,
       tunnel,
+      localModelConfig: hostModelConfig,
     });
   }
 
@@ -514,8 +524,9 @@ function shouldKeepHostTunnelWaiting(context = {}) {
 
   return shouldKeepHostOnline(context);
 }
-async function keepHostPublisherOnline({ context, output, publish, serverUrl, accessToken, tunnel }) {
+async function keepHostPublisherOnline({ context, output, publish, serverUrl, accessToken, tunnel, localModelConfig }) {
   const intervalMs = context.hostRepublishIntervalMs ?? DEFAULT_HOST_REPUBLISH_INTERVAL_MS;
+  const warm = context.warmLocalModel ?? warmLocalModel;
 
   output(statusLine('info', 'Host link', 'keeping tunnel published; press Ctrl+C to stop'));
 
@@ -549,6 +560,11 @@ async function keepHostPublisherOnline({ context, output, publish, serverUrl, ac
         output(statusLine('success', 'Host URL refreshed', tunnel.url));
       } catch (error) {
         output(statusLine('warning', 'Host refresh failed', error.message));
+      }
+
+      // Keep the model resident so it never unloads between client requests.
+      if (localModelConfig) {
+        await warm(localModelConfig);
       }
 
       timer = setTimeout(tick, intervalMs);
@@ -703,6 +719,32 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+// Load the model into memory on the local Ollama and keep it resident, so requests
+// arriving later through the tunnel are answered without a cold-load delay that the
+// tunnel's request timeout would otherwise cut off (surfaces to clients as a 408).
+async function warmLocalModel(modelConfig) {
+  if (!modelConfig?.host || !modelConfig?.model) {
+    return false;
+  }
+
+  try {
+    const response = await fetch(`${modelConfig.host}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: modelConfig.model,
+        prompt: '',
+        stream: false,
+        keep_alive: '30m',
+      }),
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 // Render coding workflow events through line output.
 function renderCodingEvent(event, output) {
