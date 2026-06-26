@@ -333,6 +333,11 @@ async function handleHostPublisherRuntime(context = {}) {
     localUrl: tunnelLocalUrl,
     output: outputStream,
     dataRoot: config.dataRoot,
+    // Let the tunnel layer discard a technique whose public URL doesn't route back
+    // to Ollama (e.g. cloudflared when QUIC is blocked) and fall through to the next.
+    verify: context.verifyPublishedTunnel === false
+      ? undefined
+      : (url) => isTunnelRoutingToOllama({ context, modelConfig: { ...modelConfig, host: url } }),
   });
 
   const tunnelVerified = await waitForPublishedTunnelReady({
@@ -443,6 +448,22 @@ function normalizeUrl(value) {
   } catch {
     return null;
   }
+}
+
+// Probe Ollama once through a candidate public URL; used by the tunnel layer to
+// pick the first technique that actually routes back to this machine.
+async function isTunnelRoutingToOllama({ context, modelConfig }) {
+  const readiness = await checkOllamaReadiness(modelConfig, {
+    ...context,
+    ollamaStartupOptions: {
+      ...(context.ollamaStartupOptions ?? {}),
+      allowLocalStart: false,
+      timeoutMs: context.hostTunnelVerifyTimeoutMs ?? 6000,
+      pollIntervalMs: 250,
+    },
+  });
+
+  return readiness.ready === true;
 }
 
 async function waitForPublishedTunnelReady({ context, output, modelConfig }) {

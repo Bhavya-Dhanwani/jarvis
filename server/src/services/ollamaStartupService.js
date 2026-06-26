@@ -203,14 +203,19 @@ function wait(ms) {
 }
 
 function createOllamaFetchHeaders(host) {
-  return isCloudflareTunnelHost(host)
+  // localtunnel (loca.lt) serves an interstitial reminder page to plain requests;
+  // this header skips it so we get Ollama's JSON instead of HTML. Harmless elsewhere.
+  return isPublicTunnelHost(host)
     ? { 'bypass-tunnel-reminder': 'true' }
     : {};
 }
 
-function isCloudflareTunnelHost(host) {
+function isPublicTunnelHost(host) {
   try {
-    return new URL(host).hostname.endsWith('.trycloudflare.com');
+    const { hostname } = new URL(host);
+    return hostname.endsWith('.trycloudflare.com')
+      || hostname.endsWith('.loca.lt')
+      || hostname.endsWith('.ngrok-free.app');
   } catch {
     return false;
   }

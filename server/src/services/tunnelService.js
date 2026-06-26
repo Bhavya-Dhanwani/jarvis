@@ -6,6 +6,7 @@ import { arch, platform, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { gunzip } from 'node:zlib';
 import { promisify } from 'node:util';
+import localtunnel from 'localtunnel';
 import { runCommand } from '../setup/ollama.js';
 import { getDefaultDataRoot } from './runtimeModeService.js';
 
@@ -14,58 +15,175 @@ const NGROK_URL_PATTERN = /https:\/\/[a-z0-9-]+\.ngrok-free\.app/i;
 const CLOUD_FLARED_RELEASE_BASE = 'https://github.com/cloudflare/cloudflared/releases/latest/download';
 const gunzipAsync = promisify(gunzip);
 
+// Try each tunnel technique in order until one produces a URL that actually routes
+// back to the local service. When a `verify` callback is supplied the URL is probed
+// before being accepted, so a provider whose edge is blocked (e.g. cloudflared over
+// UDP/QUIC) is discarded and the next technique is tried automatically.
 export async function startBestTunnel({
   localUrl,
   output = process.stdout,
   timeoutMs = 20000,
   dataRoot = getDefaultDataRoot(),
+  verify,
 } = {}) {
+  const providers = await resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot });
+
+  if (providers.length === 0) {
+    throw new Error('Could not prepare a tunnel automatically. Check your internet connection and run host setup again.');
+  }
+
+  let lastTunnel = null;
+  let lastError = null;
+
+  for (const provider of providers) {
+    let tunnel;
+
+    try {
+      tunnel = await provider.start();
+    } catch (error) {
+      lastError = error;
+      output.write(`Tunnel via ${provider.name} could not start: ${error.message}\n`);
+      continue;
+    }
+
+    if (typeof verify !== 'function') {
+      return tunnel;
+    }
+
+    const routed = await Promise.resolve(verify(tunnel.url)).catch(() => false);
+
+    if (routed) {
+      return tunnel;
+    }
+
+    output.write(`Tunnel via ${provider.name} did not route back to the local service; trying the next technique...\n`);
+    await closeTunnel(tunnel);
+    lastTunnel = tunnel;
+  }
+
+  // Nothing verified. Return the last URL we got (if any) so the caller can still
+  // surface a precise message instead of a generic failure.
+  if (lastTunnel) {
+    return lastTunnel;
+  }
+
+  throw lastError ?? new Error('Could not prepare a tunnel automatically. Check your internet connection and run host setup again.');
+}
+
+// Build the ordered list of tunnel techniques available on this machine.
+async function resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot }) {
+  const providers = [];
   const cloudflaredArgs = buildCloudflaredArgs(localUrl);
 
   if (await commandExists('cloudflared')) {
-    return startTunnelProcess({
-      command: 'cloudflared',
-      args: cloudflaredArgs,
-      pattern: CLOUDFLARED_URL_PATTERN,
-      output,
-      timeoutMs,
+    providers.push({
+      name: 'cloudflared',
+      start: () => startTunnelProcess({
+        command: 'cloudflared',
+        args: cloudflaredArgs,
+        pattern: CLOUDFLARED_URL_PATTERN,
+        output,
+        timeoutMs,
+      }),
     });
+  } else {
+    const managedCloudflared = await ensureManagedCloudflared({ dataRoot, output });
+
+    if (managedCloudflared) {
+      providers.push({
+        name: 'cloudflared',
+        start: () => startTunnelProcess({
+          command: managedCloudflared,
+          provider: 'cloudflared',
+          args: cloudflaredArgs,
+          pattern: CLOUDFLARED_URL_PATTERN,
+          output,
+          timeoutMs,
+        }),
+      });
+    }
   }
 
   if (await commandExists('ngrok')) {
-    return startTunnelProcess({
-      command: 'ngrok',
-      provider: 'ngrok',
-      // ngrok forwards its public hostname as the Host header by default, which
-      // Ollama rejects with a 403. Rewrite it to the local origin like cloudflared.
-      args: ['http', '--host-header', localHostHeader(localUrl) ?? 'localhost:11434', localUrl],
-      pattern: NGROK_URL_PATTERN,
-      output,
-      timeoutMs,
+    providers.push({
+      name: 'ngrok',
+      start: () => startTunnelProcess({
+        command: 'ngrok',
+        provider: 'ngrok',
+        // ngrok forwards its public hostname as the Host header by default, which
+        // Ollama rejects with a 403. Rewrite it to the local origin like cloudflared.
+        args: ['http', '--host-header', localHostHeader(localUrl) ?? 'localhost:11434', localUrl],
+        pattern: NGROK_URL_PATTERN,
+        output,
+        timeoutMs,
+      }),
     });
   }
 
-  const managedCloudflared = await ensureManagedCloudflared({ dataRoot, output });
+  // localtunnel is a pure-Node fallback that rides TCP/443 (no UDP, no account),
+  // so it works on networks that block cloudflared's QUIC edge.
+  providers.push({
+    name: 'localtunnel',
+    start: () => startLocaltunnel({ localUrl, output, timeoutMs }),
+  });
 
-  if (managedCloudflared) {
-    return startTunnelProcess({
-      command: managedCloudflared,
-      provider: 'cloudflared',
-      args: cloudflaredArgs,
-      pattern: CLOUDFLARED_URL_PATTERN,
-      output,
-      timeoutMs,
-    });
+  return providers;
+}
+
+async function startLocaltunnel({ localUrl, output, timeoutMs }) {
+  const target = new URL(localUrl);
+  const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
+  const tunnel = await withTimeout(
+    localtunnel({ port, local_host: target.hostname }),
+    timeoutMs,
+    'localtunnel',
+  );
+
+  output.write(`Tunnel online through localtunnel: ${tunnel.url}\n`);
+
+  return {
+    provider: 'localtunnel',
+    url: tunnel.url,
+    // Adapt localtunnel's close() to the { process: { kill } } shape callers expect.
+    process: { kill: () => tunnel.close() },
+  };
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out waiting for ${label} to provide a public URL.`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function closeTunnel(tunnel) {
+  try {
+    tunnel?.process?.kill?.();
+  } catch {
+    // Ignore failures while discarding a tunnel we are not going to use.
   }
-
-  throw new Error('Could not prepare a tunnel automatically. Check your internet connection and run host setup again.');
 }
 
 // Ollama rejects requests whose Host header is not localhost/127.0.0.1 with a 403.
 // cloudflared forwards the public *.trycloudflare.com hostname by default, so we
 // rewrite the Host header to the local origin to keep Ollama reachable through the tunnel.
 function buildCloudflaredArgs(localUrl) {
-  const args = ['tunnel', '--url', localUrl];
+  // Force the http2 edge protocol (TCP 443) instead of the default QUIC (UDP 7844).
+  // Many networks block outbound UDP, which lets cloudflared print a public URL that
+  // never actually routes traffic back to this machine. http2 rides over TCP/443.
+  const args = ['tunnel', '--url', localUrl, '--protocol', 'http2'];
   const hostHeader = localHostHeader(localUrl);
 
   if (hostHeader) {
