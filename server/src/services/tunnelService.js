@@ -26,6 +26,11 @@ export async function startBestTunnel({
   timeoutMs = 20000,
   dataRoot = getDefaultDataRoot(),
   verify,
+  // How long to keep probing a single provider before declaring it dead and moving
+  // on. cloudflared's edge can take 5-15s to become routable on a cold start, so a
+  // one-shot probe would wrongly abandon the fast tunnel and fall back to a slow one.
+  verifyWindowMs = 18000,
+  verifyIntervalMs = 1500,
 } = {}) {
   const providers = await resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot });
 
@@ -51,9 +56,15 @@ export async function startBestTunnel({
       return tunnel;
     }
 
-    const routed = await Promise.resolve(verify(tunnel.url)).catch(() => false);
+    const routed = await verifyWithPatience(verify, tunnel.url, {
+      windowMs: verifyWindowMs,
+      intervalMs: verifyIntervalMs,
+      output,
+      name: provider.name,
+    });
 
     if (routed) {
+      output.write(`Tunnel via ${provider.name} verified: ${tunnel.url}\n`);
       return tunnel;
     }
 
@@ -69,6 +80,33 @@ export async function startBestTunnel({
   }
 
   throw lastError ?? new Error('Could not prepare a tunnel automatically. Check your internet connection and run host setup again.');
+}
+
+// Probe a provider's URL repeatedly until it routes or the window elapses, so a
+// fast tunnel that is merely slow to warm up is not abandoned for a slower one.
+async function verifyWithPatience(verify, url, { windowMs, intervalMs, output, name }) {
+  const attempts = Math.max(1, Math.ceil(windowMs / intervalMs));
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const routed = await Promise.resolve(verify(url)).catch(() => false);
+
+    if (routed) {
+      return true;
+    }
+
+    if (attempt < attempts) {
+      output.write(`Waiting for ${name} edge to come online (${attempt}/${attempts})...\n`);
+      await delay(intervalMs);
+    }
+  }
+
+  return false;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 // Build the ordered list of tunnel techniques available on this machine.
@@ -175,6 +213,10 @@ function startHostRewriteProxy(targetUrl) {
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
+      // Disable Nagle so streamed Ollama tokens are flushed immediately instead of
+      // being buffered ~40ms each, which otherwise makes streamed replies feel slow.
+      req.socket.setNoDelay(true);
+
       const proxyReq = httpRequest(
         {
           hostname: target.hostname,
@@ -188,6 +230,8 @@ function startHostRewriteProxy(targetUrl) {
           proxyRes.pipe(res);
         },
       );
+
+      proxyReq.setNoDelay(true);
 
       proxyReq.on('error', () => {
         if (!res.headersSent) {
