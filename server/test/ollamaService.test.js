@@ -283,6 +283,70 @@ test('ollama service sends tools and preserves tool-call context', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+// Verify implementation tool turns explicitly disable reasoning so coding does not pay
+// the thinking tax on models that reason by default.
+test('generateToolTurn disables thinking by default', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody = null;
+
+  globalThis.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      message: { role: 'assistant', content: 'done' },
+      done: true,
+    }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    await service.generateToolTurn([{ role: 'user', content: 'edit index.html' }], { tools: [] });
+
+    assert.equal(sentBody.think, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify a tool turn falls back to omitting think when the model has no reasoning mode.
+test('generateToolTurn falls back when the model rejects think', async () => {
+  const originalFetch = globalThis.fetch;
+  const sentThinkValues = [];
+
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sentThinkValues.push(body.think);
+
+    if (body.think === false) {
+      return new Response('"gemma" does not support thinking', { status: 400 });
+    }
+
+    return new Response(JSON.stringify({
+      message: { role: 'assistant', content: 'done' },
+      done: true,
+    }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    const message = await service.generateToolTurn([{ role: 'user', content: 'edit index.html' }], { tools: [] });
+
+    assert.equal(message.content, 'done');
+    assert.deepEqual(sentThinkValues, [false, undefined]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // Coalesce simultaneous warm-up calls into one Ollama model load.
 test('ollama service warms a model only once concurrently', async () => {
   const originalFetch = globalThis.fetch;
@@ -471,7 +535,55 @@ test('generateReply skips think mode for short casual prompts', async () => {
       onToken: () => {},
     });
 
-    assert.equal(sentBody.think, undefined);
+    // Thinking models reason by default, so a casual prompt must explicitly disable it
+    // (think:false) rather than omit the field, or the model thinks anyway.
+    assert.equal(sentBody.think, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify reasoning that eats the whole budget disables thinking and retries the
+// original prompt instead of injecting the confusing "continue where you stopped" turn.
+test('generateReply disables thinking when reasoning overflows without an answer', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestBodies = [];
+
+  globalThis.fetch = async (_url, init) => {
+    requestBodies.push(JSON.parse(init.body));
+
+    if (requestBodies.length === 1) {
+      // Reasoning consumed the budget: thinking streamed, no answer content, length stop.
+      return new Response([
+        '{"message":{"thinking":"hmm let me think"},"done":false}\n',
+        '{"done":true,"done_reason":"length"}\n',
+      ].join(''));
+    }
+
+    return new Response('{"message":{"content":"Hey! I am good."},"done":true,"done_reason":"stop"}\n');
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+      warmOnStart: false,
+      think: true,
+    });
+
+    const reply = await service.generateReply([
+      { role: 'user', content: 'please tell me in a friendly way how your day is going so far today' },
+    ], { onToken: () => {} });
+
+    assert.equal(reply, 'Hey! I am good.');
+    assert.equal(requestBodies.length, 2);
+    // First turn requested reasoning; the retry explicitly disables it.
+    assert.equal(requestBodies[0].think, true);
+    assert.equal(requestBodies[1].think, false);
+    // The retry must NOT inject the "continue where you stopped" continuation prompt.
+    const injected = requestBodies[1].messages.some((message) => /continue exactly where you stopped/i.test(message.content ?? ''));
+    assert.equal(injected, false);
   } finally {
     globalThis.fetch = originalFetch;
   }

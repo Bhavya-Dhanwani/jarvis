@@ -35,6 +35,26 @@ test('coding intent service lets the model choose coding mode', async () => {
   assert.match(decision.reason, /modify files/);
 });
 
+// Verify intent routing runs cheaply: it must never reason and must cap its output,
+// because it executes before every answer and would otherwise double response latency.
+test('coding intent service classifies without reasoning', async () => {
+  let receivedOptions = null;
+  const service = createCodingIntentService({
+    assistantService: {
+      async generateReply(_messages, options) {
+        receivedOptions = options;
+        return '{"intent":"chat","reason":"ordinary question"}';
+      },
+    },
+  });
+
+  await service.classify('what programming languages do you know?');
+
+  assert.equal(receivedOptions.think, false);
+  assert.equal(receivedOptions.maxContinuations, 0);
+  assert.equal(receivedOptions.generationOptions.num_predict, 64);
+});
+
 // Verify malformed classifier output safely stays in chat mode.
 test('coding intent service falls back to chat mode', async () => {
   const service = createCodingIntentService({

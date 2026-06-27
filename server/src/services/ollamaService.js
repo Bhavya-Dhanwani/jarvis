@@ -46,17 +46,34 @@ export class OllamaService {
     await this.#waitForBackgroundWarmUp();
 
     const options = createRequestOptions(this.config.options, messages);
-    const result = await sendChatRequestWithEmptyRetry({
+    const requestMessages = createRequestMessages(messages);
+
+    // Implementation tool turns should not burn time reasoning. Thinking-capable models
+    // reason by default, so disable it explicitly (think:false); omit the field only when
+    // the model rejects it, mirroring the chat path's fallback.
+    const send = (think) => sendChatRequestWithEmptyRetry({
       host: this.config.host,
       model: this.config.model,
       keepAlive: this.config.keepAlive,
-      messages: createRequestMessages(messages),
+      messages: requestMessages,
       options,
       tools,
       allowToolCalls: true,
+      think,
     }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
 
-    return result.message;
+    try {
+      const result = await send(this.thinkDisabled ? undefined : false);
+      return result.message;
+    } catch (error) {
+      if (!this.thinkDisabled && isThinkingUnsupported(error)) {
+        this.thinkDisabled = true;
+        const result = await send(undefined);
+        return result.message;
+      }
+
+      throw error;
+    }
   }
 
   // Ask Ollama to load the model before the first user message.
@@ -146,6 +163,11 @@ export class OllamaService {
     for (let attempt = 0; attempt <= continuationLimit; attempt++) {
       let result;
 
+      // Thinking-capable models (e.g. Qwen3) reason by default unless thinking is
+      // explicitly turned off, so send think:false rather than omitting the field.
+      // Models that reject the field entirely fall back to omitting it (thinkDisabled).
+      const thinkParam = this.thinkDisabled ? undefined : wantThink;
+
       try {
         result = await sendChatRequestWithEmptyRetry({
           host: this.config.host,
@@ -155,14 +177,13 @@ export class OllamaService {
           options,
           onToken,
           onThinking,
-          think: wantThink,
+          think: thinkParam,
         }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
       } catch (error) {
-        // If the model rejects the think flag, disable it for this process and retry
-        // so chat keeps working on models without a reasoning/thinking mode.
-        if (wantThink && isThinkingUnsupported(error)) {
+        // If the model rejects the think flag, stop sending it for this process and
+        // retry so chat keeps working on models without a reasoning/thinking mode.
+        if (!this.thinkDisabled && isThinkingUnsupported(error)) {
           this.thinkDisabled = true;
-          wantThink = false;
           attempt -= 1;
           continue;
         }
@@ -174,6 +195,15 @@ export class OllamaService {
 
       if (!result.stoppedByLength) {
         return reply.trim();
+      }
+
+      // Reasoning that consumes the whole token budget before any answer leaves an
+      // empty turn. Re-prompting with "continue where you stopped" then makes thinking
+      // models ramble about that instruction instead of answering, so disable thinking
+      // and retry the original prompt so the budget goes to the answer.
+      if (wantThink && !reply.trim()) {
+        wantThink = false;
+        continue;
       }
 
       requestMessages = createContinuationMessages(requestMessages, reply);
@@ -260,7 +290,7 @@ function createEmptyResponseRetryMessages(messages) {
 }
 
 // Send one Ollama chat request.
-async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, onThinking, think = false, tools = [], allowToolCalls = false }) {
+async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, onThinking, think = undefined, tools = [], allowToolCalls = false }) {
   const response = await fetchOllama(`${host}/api/chat`, {
     method: 'POST',
     headers: createOllamaFetchHeaders(host),
@@ -270,8 +300,9 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
       stream: typeof onToken === 'function',
       keep_alive: keepAlive ?? '2m',
       options,
-      // Ask the model to stream its reasoning separately (shown as "Thinking...").
-      ...(think ? { think: true } : {}),
+      // Thinking-capable models reason by default; pass an explicit boolean so think:false
+      // actively disables reasoning. Omit the field only when the model can't accept it.
+      ...(think === true ? { think: true } : think === false ? { think: false } : {}),
       ...(tools.length > 0 ? { tools } : {}),
     }),
   }, { host });
