@@ -33,7 +33,8 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
     },
 
     prompt() {
-      return `${theme.accent('>')} ${theme.primary('you')} ${theme.dim('>')} `;
+      // Leading blank line separates each turn so the chat is not visually compact.
+      return `\n${theme.accent('>')} ${theme.primary('you')} ${theme.dim('>')} `;
     },
 
     saved() {
@@ -49,7 +50,7 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
     },
 
     thinkingStart() {
-      output.write(`${theme.dim('Thinking...')}\n`);
+      output.write(`\n${theme.dim('Thinking...')}\n`);
     },
 
     thinkingChunk(chunk) {
@@ -58,11 +59,12 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
     },
 
     thinkingEnd() {
-      output.write(`\n${theme.dim('...done thinking')}\n\n`);
+      output.write(`\n${theme.dim('...done thinking')}\n`);
     },
 
     assistantStart() {
-      output.write(`${theme.cyan('JARVIS')} ${theme.dim('>')} `);
+      // Leading blank line gives the answer breathing room from the prompt/reasoning.
+      output.write(`\n${theme.cyan('JARVIS')} ${theme.dim('>')} `);
     },
 
     assistantChunk(chunk) {
@@ -71,6 +73,23 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
 
     assistantEnd() {
       output.write('\n');
+    },
+
+    // Dim, one-line latency breakdown to pinpoint where time goes. Hide with JARVIS_TIMING=0.
+    timing({ sentAt, firstReasoningAt, firstTokenAt, doneAt }) {
+      if (/^(0|false|no|off)$/i.test(String(process.env.JARVIS_TIMING ?? '').trim())) {
+        return;
+      }
+
+      const secs = (from, to) => (from && to ? `${((to - from) / 1000).toFixed(1)}s` : '—');
+      const firstOut = firstReasoningAt ?? firstTokenAt;
+      const parts = [
+        `first response ${secs(sentAt, firstOut)}`,
+        `first answer ${secs(sentAt, firstTokenAt)}`,
+        `total ${secs(sentAt, doneAt)}`,
+      ];
+
+      output.write(`${theme.dim(`[timing] ${parts.join(' · ')}`)}\n`);
     },
 
     sessionSaved() {

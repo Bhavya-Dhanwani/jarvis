@@ -86,7 +86,7 @@ export class OllamaService {
   }
 
   // Generate an assistant reply from chat history.
-  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null } = {}) {
+  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null, think = null } = {}) {
     const localReply = createLocalFastReply(messages);
 
     if (localReply) {
@@ -121,12 +121,12 @@ export class OllamaService {
           options,
           onToken,
           onThinking,
-          think: this.#thinkEnabled(),
+          think: this.#thinkEnabled(think),
         }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
       } catch (error) {
         // If the model rejects the think flag, disable it for this process and retry
         // so chat keeps working on models without a reasoning/thinking mode.
-        if (this.#thinkEnabled() && isThinkingUnsupported(error)) {
+        if (this.#thinkEnabled(think) && isThinkingUnsupported(error)) {
           this.thinkDisabled = true;
           attempt -= 1;
           continue;
@@ -151,10 +151,11 @@ export class OllamaService {
     return reply.trim();
   }
 
-  // Whether to ask Ollama to stream the model's reasoning (default on; disabled if the
-  // configured model turns out not to support it).
-  #thinkEnabled() {
-    return (this.config.think ?? true) && this.thinkDisabled !== true;
+  // Whether to ask Ollama to stream the model's reasoning. Per-call override wins over
+  // the config default; auto-disabled if the model turns out to have no thinking mode.
+  #thinkEnabled(override = null) {
+    const want = override === null ? (this.config.think ?? true) : override;
+    return want && this.thinkDisabled !== true;
   }
 }
 
@@ -413,7 +414,9 @@ async function readStreamingReply(response, onToken, onThinking = null) {
 
   emit(parseStreamLine(buffer, { hasReply: reply.length > 0 }));
 
-  if (!reply.trim()) {
+  // Empty output is only a (retryable) failure when the model actually stopped. If it
+  // hit the length limit, return so generateReply can continue from where it stopped.
+  if (!reply.trim() && !stoppedByLength) {
     throw createEmptyResponseError();
   }
 
@@ -437,14 +440,12 @@ function parseStreamLine(line, { hasReply = false } = {}) {
     throw new Error(payload.error);
   }
 
-  if (payload.done && payload.done_reason === 'length' && !hasReply) {
-    throw new Error('Ollama stopped before producing text. Increase the response token budget.');
-  }
-
   return {
     content: payload.message?.content ?? '',
     // Thinking-capable models stream their reasoning in a separate `thinking` field.
     thinking: payload.message?.thinking ?? '',
+    // Hitting the token limit is not an error: generateReply auto-continues from here
+    // (e.g. when reasoning consumed the budget before the answer started).
     stoppedByLength: payload.done_reason === 'length',
   };
 }

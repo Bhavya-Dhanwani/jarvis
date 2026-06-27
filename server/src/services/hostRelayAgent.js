@@ -7,12 +7,20 @@ import { toRelayUrl } from './relayUrl.js';
 // Dispatch a single relay "call" frame to the local assistant and emit response
 // frames through `send`. Kept separate from the socket lifecycle so it is trivially
 // testable with a mock OllamaService and a capturing `send`.
-export async function handleRelayCall({ frame, ollamaService, send }) {
+export async function handleRelayCall({ frame, ollamaService, send, log = null }) {
   const { id, method, args = {} } = frame ?? {};
 
   if (!id || !method) {
     return;
   }
+
+  const startedAt = Date.now();
+  let firstChunkAt = null;
+  const markFirstChunk = () => {
+    if (firstChunkAt === null) {
+      firstChunkAt = Date.now();
+    }
+  };
 
   try {
     if (method === 'warmUp') {
@@ -26,13 +34,26 @@ export async function handleRelayCall({ frame, ollamaService, send }) {
 
     if (method === 'generateReply') {
       const reply = await ollamaService.generateReply(args.messages ?? [], {
-        onToken: (chunk) => send({ type: 'token', id, chunk }),
-        onThinking: (chunk) => send({ type: 'thinking', id, chunk }),
+        onToken: (chunk) => {
+          markFirstChunk();
+          send({ type: 'token', id, chunk });
+        },
+        onThinking: (chunk) => {
+          markFirstChunk();
+          send({ type: 'thinking', id, chunk });
+        },
         generationOptions: args.generationOptions ?? {},
         maxContinuations: args.maxContinuations ?? null,
       });
 
       send({ type: 'result', id, value: reply });
+
+      if (typeof log === 'function') {
+        const first = firstChunkAt ? `${((firstChunkAt - startedAt) / 1000).toFixed(1)}s` : '—';
+        const total = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+        log(`host first chunk ${first} · host total ${total}`);
+      }
+
       return;
     }
 
@@ -103,7 +124,12 @@ export function createHostRelayAgent({
       const frame = parseJson(raw);
 
       if (frame?.type === 'call') {
-        handleRelayCall({ frame, ollamaService, send });
+        handleRelayCall({
+          frame,
+          ollamaService,
+          send,
+          log: (detail) => output('info', 'Relay timing', detail),
+        });
       }
     });
 

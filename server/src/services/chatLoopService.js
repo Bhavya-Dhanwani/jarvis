@@ -184,9 +184,18 @@ export class ChatLoopService {
       let streamStarted = false;
       let thinkingStarted = false;
 
+      // Timing instrumentation to pinpoint where latency is (set JARVIS_TIMING=0 to hide).
+      const sentAt = Date.now();
+      let firstReasoningAt = null;
+      let firstTokenAt = null;
+
       // Ask the chat service to persist and generate a reply.
       const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message, {
         onThinking: (chunk) => {
+          if (firstReasoningAt === null) {
+            firstReasoningAt = Date.now();
+          }
+
           if (!thinkingStarted) {
             this.ui.thinkingStart?.();
             thinkingStarted = true;
@@ -195,6 +204,10 @@ export class ChatLoopService {
           this.ui.thinkingChunk?.(chunk);
         },
         onToken: (chunk) => {
+          if (firstTokenAt === null) {
+            firstTokenAt = Date.now();
+          }
+
           // Close the reasoning block once the real answer begins streaming.
           if (thinkingStarted && !streamStarted) {
             this.ui.thinkingEnd?.();
@@ -208,6 +221,13 @@ export class ChatLoopService {
           streamed = true;
           this.ui.assistantChunk?.(chunk);
         },
+      });
+
+      this.ui.timing?.({
+        sentAt,
+        firstReasoningAt,
+        firstTokenAt,
+        doneAt: Date.now(),
       });
 
       // Print assistant replies when present.

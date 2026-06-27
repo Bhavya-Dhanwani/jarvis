@@ -184,12 +184,16 @@ function createModelWorkerPool(assistantService) {
       return runToolAgent({ assistantService, agent, task, context, messages });
     }
 
+    // Coding agents produce structured output, not chat: disable visible reasoning so
+    // the token budget goes to the answer, and allow a few continuations so hitting the
+    // limit auto-continues instead of failing.
     const output = await assistantService.generateReply(messages, new Set(['planner', 'prd']).has(agent)
       ? {
         generationOptions: { num_predict: 128 },
-        maxContinuations: 0,
+        maxContinuations: 4,
+        think: false,
       }
-      : {});
+      : { think: false });
 
     return {
       agent,
