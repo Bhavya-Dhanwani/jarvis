@@ -1,6 +1,35 @@
 // Service for sending chat messages to Ollama.
 const DEFAULT_MAX_AUTO_CONTINUATIONS = 12;
 const DEFAULT_EMPTY_RESPONSE_RETRIES = 2;
+// Transient connection failures (Ollama briefly busy, reloading, or recovering from a
+// memory spike during a long coding run) should not abort the whole request.
+const DEFAULT_CONNECT_RETRIES = 3;
+
+// fetch() to Ollama with retries on network-level failures ("fetch failed",
+// ECONNRESET, ECONNREFUSED). HTTP error responses are returned as-is, not retried.
+async function fetchOllama(url, init, { host, retries = DEFAULT_CONNECT_RETRIES } = {}) {
+  let lastError;
+
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      return await fetch(url, init);
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < retries - 1) {
+        await delay(400 * (attempt + 1));
+      }
+    }
+  }
+
+  throw new Error(`Could not reach Ollama at ${host}: ${lastError?.message ?? 'fetch failed'}`);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 export class OllamaService {
   // Store model configuration.
@@ -232,7 +261,7 @@ function createEmptyResponseRetryMessages(messages) {
 
 // Send one Ollama chat request.
 async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, onThinking, think = false, tools = [], allowToolCalls = false }) {
-  const response = await fetch(`${host}/api/chat`, {
+  const response = await fetchOllama(`${host}/api/chat`, {
     method: 'POST',
     headers: createOllamaFetchHeaders(host),
     body: JSON.stringify({
@@ -245,9 +274,7 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
       ...(think ? { think: true } : {}),
       ...(tools.length > 0 ? { tools } : {}),
     }),
-  }).catch((error) => {
-    throw new Error(`Could not reach Ollama at ${host}: ${error.message}`);
-  });
+  }, { host });
 
   if (!response.ok) {
     const body = await response.text();

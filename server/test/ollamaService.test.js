@@ -476,3 +476,39 @@ test('generateReply skips think mode for short casual prompts', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+// Verify a transient Ollama connection drop is retried instead of aborting the run.
+test('ollama service retries a transient connection failure', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+
+  globalThis.fetch = async () => {
+    calls += 1;
+
+    if (calls === 1) {
+      throw new TypeError('fetch failed');
+    }
+
+    return new Response(JSON.stringify({
+      message: { content: 'Recovered.' },
+      done: true,
+      done_reason: 'stop',
+    }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+      warmOnStart: false,
+    });
+
+    const reply = await service.generateReply([{ role: 'user', content: 'write an html page' }]);
+
+    assert.equal(reply, 'Recovered.');
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

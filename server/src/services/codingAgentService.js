@@ -184,16 +184,40 @@ function createModelWorkerPool(assistantService) {
       return runToolAgent({ assistantService, agent, task, context, messages });
     }
 
-    // Coding agents produce structured output, not chat: disable visible reasoning so
-    // the token budget goes to the answer, and allow a few continuations so hitting the
-    // limit auto-continues instead of failing.
-    const output = await assistantService.generateReply(messages, new Set(['planner', 'prd']).has(agent)
+    // Reasoning agents (planner/prd) stream their thinking to the UI; implementation
+    // agents use the tool loop. think stays off for the tool-running default path so
+    // its token budget goes to the answer.
+    const isReasoner = new Set(['planner', 'prd']).has(agent);
+
+    // Track reasoning so the client can show it live and collapse it on completion.
+    let thinkChars = 0;
+    let thinkStartedAt = null;
+
+    const output = await assistantService.generateReply(messages, isReasoner
       ? {
-        generationOptions: { num_predict: 128 },
+        generationOptions: { num_predict: 256 },
         maxContinuations: 4,
-        think: false,
+        think: true,
+        onThinking: (chunk) => {
+          if (thinkStartedAt === null) {
+            thinkStartedAt = Date.now();
+            context.onEvent?.({ type: 'agent.thinking.started', agent });
+          }
+
+          thinkChars += String(chunk ?? '').length;
+          context.onEvent?.({ type: 'agent.thinking', agent, chunk });
+        },
       }
       : { think: false });
+
+    if (thinkStartedAt !== null) {
+      context.onEvent?.({
+        type: 'agent.thinking.completed',
+        agent,
+        chars: thinkChars,
+        elapsedMs: Date.now() - thinkStartedAt,
+      });
+    }
 
     return {
       agent,
@@ -273,6 +297,17 @@ async function runToolAgent({ assistantService, agent, task, context, messages }
       const name = toolCall?.function?.name;
       const rawArgs = parseToolArguments(toolCall?.function?.arguments);
       const args = toolService.normalizeArguments(name, rawArgs, { fallbackPath });
+
+      // Weaker models sometimes send write_file content with no path. Derive a sensible
+      // filename from the content so the file is created instead of looping on an error.
+      if (name === 'write_file' && !args.path && args.content !== undefined && args.content !== null) {
+        const inferred = inferWriteFilePath(String(args.content), writtenPaths);
+
+        if (inferred) {
+          args.path = toolService.workspacePath(inferred) || inferred;
+        }
+      }
+
       context.onEvent?.({ type: 'tool.started', task, tool: name, args });
 
       try {
@@ -390,6 +425,31 @@ function createToolRepairMessage(name, error, targetPaths) {
     : '';
 
   return `Tool error: ${error.message}.${example}${targetHint} Correct the arguments and do not repeat the same invalid call.`;
+}
+
+// Guess a filename for a path-less write_file from the content (web tasks are the
+// common case). Skips names already written so multiple files don't collide.
+export function inferWriteFilePath(content, writtenPaths = new Set()) {
+  const text = content.trim();
+  let preferred = null;
+
+  if (/<!doctype html|<html[\s>]|<body[\s>]|<head[\s>]|<div[\s>]/i.test(text)) {
+    preferred = 'index.html';
+  } else if (/\b(function\b|=>|const\s|let\s|var\s|document\.|console\.|addEventListener)/.test(text)) {
+    preferred = 'script.js';
+  } else if (/\{[^}]*:[^}]*;[^}]*\}/.test(text)) {
+    preferred = 'style.css';
+  }
+
+  const candidates = [preferred, 'index.html', 'script.js', 'style.css'].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (!writtenPaths.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return '';
 }
 
 function findTargetPaths(context, toolService) {

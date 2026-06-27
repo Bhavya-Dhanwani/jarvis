@@ -282,6 +282,7 @@ export class ChatLoopService {
         this.chatService.saveAssistantMessage(chatId, response);
       }
 
+      this.ui.finalizing?.();
       await this.ui.assistant(response);
     } catch (error) {
       this.ui.unavailable(error.message);
