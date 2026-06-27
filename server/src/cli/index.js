@@ -24,6 +24,8 @@ import {
   refreshAccessToken,
 } from '../services/authClientService.js';
 import { startBestTunnel } from '../services/tunnelService.js';
+import { createHostRelayAgent } from '../services/hostRelayAgent.js';
+import { RelayAssistantService } from '../services/relayAssistantService.js';
 import {
   RUNTIME_MODES,
   loadAuth,
@@ -323,6 +325,13 @@ async function handleHostPublisherRuntime(context = {}) {
   }
 
   const refresh = context.refreshAccessToken ?? refreshAccessToken;
+
+  // Relay mode (default): keep a WebSocket open to the signaling server instead of
+  // exposing a public tunnel. The model runs locally and streams over the socket.
+  if (isRelayEnabled(context, env)) {
+    return runHostRelay({ context, env, auth, hostModelConfig, refresh, output });
+  }
+
   const publish = context.publishOllamaUrl ?? publishOllamaUrl;
   const openTunnel = context.startBestTunnel ?? startBestTunnel;
   const accessToken = await refresh({
@@ -396,6 +405,62 @@ async function handleHostPublisherRuntime(context = {}) {
       tunnel,
       localModelConfig: hostModelConfig,
     });
+  }
+
+  return result;
+}
+
+// Whether to use the WebSocket relay (default) instead of the public tunnel.
+function isRelayEnabled(context = {}, env = process.env) {
+  if (typeof context.relayEnabled === 'boolean') {
+    return context.relayEnabled;
+  }
+
+  return !/^(0|false|no|off)$/i.test(String(env.JARVIS_RELAY ?? '').trim());
+}
+
+// Run host mode over the relay: warm the model, then hold a WebSocket open to the
+// signaling server as the active host until the user stops it (Ctrl+C).
+async function runHostRelay({ context, env, auth, hostModelConfig, refresh, output }) {
+  const warm = context.warmLocalModel ?? warmLocalModel;
+  const warmed = await warm(hostModelConfig);
+  output(warmed
+    ? statusLine('success', 'Model warm', `${hostModelConfig.model} loaded and kept resident`)
+    : statusLine('warning', 'Model warm-up skipped', 'first request may be slow while the model loads'));
+
+  const ollamaService = context.hostAssistantService ?? new OllamaService(hostModelConfig);
+  const getAccessToken = () => refresh({
+    serverUrl: auth.serverUrl,
+    refreshToken: auth.refreshToken,
+  });
+
+  const agent = (context.createHostRelayAgent ?? createHostRelayAgent)({
+    signalingServerUrl: auth.serverUrl,
+    getAccessToken,
+    ollamaService,
+    warm: () => warm(hostModelConfig),
+    output: (level, title, detail) => output(statusLine(level, title, detail)),
+  });
+
+  output(successBox('Host mode is online over the relay. Clients can now reach this machine.'));
+  output(card('HOST LINK', [
+    ['Server', auth.serverUrl],
+    ['Transport', 'relay (websocket)'],
+    ['Model', hostModelConfig.model],
+  ], { borderColor: 'green' }));
+
+  const result = {
+    status: 'ok',
+    command: 'host',
+    mode: RUNTIME_MODES.HOST,
+    transport: 'relay',
+  };
+
+  const started = agent.start();
+
+  // Block on the keep-alive loop only in interactive mode; tests/non-TTY return now.
+  if (shouldKeepHostOnline(context)) {
+    await started;
   }
 
   return result;
@@ -657,6 +722,11 @@ export async function prepareRuntimeConfig(context = {}) {
 }
 
 async function resolveReadyRuntimeConfig({ context, output, command }) {
+  // Client + relay: attach the relay assistant up front. This makes prepareRuntimeConfig
+  // skip the tunnel-URL claim and checkOllamaReadiness skip the HTTP probe (both already
+  // short-circuit when context.assistantService is set).
+  await setupClientRelayIfEnabled({ context, output });
+
   const keepWaiting = shouldKeepClientWaiting(context);
   const maxAttempts = keepWaiting ? Infinity : (context.remoteOllamaMaxAttempts ?? 1);
   const pollIntervalMs = context.remoteOllamaPollIntervalMs ?? DEFAULT_CLIENT_URL_POLL_INTERVAL_MS;
@@ -698,6 +768,58 @@ function shouldKeepClientWaiting(context = {}) {
 
   const outputStream = context.outputStream ?? process.stdout;
   return outputStream.isTTY === true;
+}
+
+// For client mode with relay enabled, build a RelayAssistantService, connect it, and
+// wait for a host to be online. Injecting it as context.assistantService routes all
+// model calls over the WebSocket relay instead of an HTTP tunnel URL.
+async function setupClientRelayIfEnabled({ context, output }) {
+  const env = context.env ?? process.env;
+  const config = loadJarvisConfig({ env });
+
+  if (config?.mode !== RUNTIME_MODES.CLIENT || !isRelayEnabled(context, env)) {
+    return;
+  }
+
+  // Respect explicit injection (tests) or an already-prepared assistant. Mirrors the
+  // guard in prepareRuntimeConfig so a test controlling readiness via ensureOllamaReady
+  // keeps the non-relay path.
+  if (context.assistantService
+    || context.codingAgentService
+    || context.database
+    || context.ensureOllamaReady) {
+    return;
+  }
+
+  const auth = loadAuth({ env });
+
+  if (!auth?.refreshToken || !auth?.serverUrl) {
+    throw new Error('Client mode needs auth. Run "jarvis setup" or "jarvis change" and login first.');
+  }
+
+  const refresh = context.refreshAccessToken ?? refreshAccessToken;
+  const relay = (context.createRelayAssistant ?? createRelayAssistant)({
+    signalingServerUrl: auth.serverUrl,
+    getAccessToken: () => refresh({ serverUrl: auth.serverUrl, refreshToken: auth.refreshToken }),
+  });
+
+  output(statusLine('info', 'Relay', 'connecting to the host through the signaling server...'));
+
+  try {
+    await relay.connect();
+    const keepWaiting = shouldKeepClientWaiting(context);
+    await relay.waitForHost(keepWaiting ? 0 : (context.relayHostWaitMs ?? 5000));
+    output(statusLine('success', 'Relay ready', 'host is online; responses will stream live'));
+  } catch (error) {
+    output(statusLine('warning', 'Waiting for host', error.message ?? 'no host online yet'));
+  }
+
+  context.assistantService = relay;
+}
+
+// Indirection so tests can inject a fake relay assistant.
+function createRelayAssistant(options) {
+  return new RelayAssistantService(options);
 }
 
 async function checkOllamaReadiness(modelConfig, context = {}) {

@@ -143,6 +143,8 @@ test('CLI host mode publishes temporary Ollama URL and exits', async () => {
     env: {
       JARVIS_CONFIG_PATH: configPath,
     },
+    // These cases exercise the tunnel fallback; relay mode is covered by its own tests.
+    relayEnabled: false,
     output: (line) => lines.push(line),
     outputStream: {
       write: (chunk) => tunnelOutput.push(String(chunk)),
@@ -203,6 +205,8 @@ test('CLI host mode uses the reachable local Ollama URL for the tunnel', async (
     env: {
       JARVIS_CONFIG_PATH: configPath,
     },
+    // These cases exercise the tunnel fallback; relay mode is covered by its own tests.
+    relayEnabled: false,
     output: () => {},
     outputStream: {
       write: () => {},
@@ -253,6 +257,8 @@ test('CLI host mode waits for public tunnel readiness before publishing', async 
     env: {
       JARVIS_CONFIG_PATH: configPath,
     },
+    // These cases exercise the tunnel fallback; relay mode is covered by its own tests.
+    relayEnabled: false,
     output: () => {},
     outputStream: {
       write: () => {},
@@ -310,6 +316,8 @@ test('CLI host mode refuses to publish an unreachable public tunnel', async () =
     env: {
       JARVIS_CONFIG_PATH: configPath,
     },
+    // These cases exercise the tunnel fallback; relay mode is covered by its own tests.
+    relayEnabled: false,
     output: () => {},
     outputStream: {
       write: () => {},
@@ -360,6 +368,8 @@ test('CLI host mode warms the local model before publishing the URL', async () =
     env: {
       JARVIS_CONFIG_PATH: configPath,
     },
+    // These cases exercise the tunnel fallback; relay mode is covered by its own tests.
+    relayEnabled: false,
     output: () => {},
     outputStream: {
       write: () => {},
