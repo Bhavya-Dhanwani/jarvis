@@ -182,10 +182,24 @@ export class ChatLoopService {
     try {
       let streamed = false;
       let streamStarted = false;
+      let thinkingStarted = false;
 
       // Ask the chat service to persist and generate a reply.
       const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message, {
+        onThinking: (chunk) => {
+          if (!thinkingStarted) {
+            this.ui.thinkingStart?.();
+            thinkingStarted = true;
+          }
+
+          this.ui.thinkingChunk?.(chunk);
+        },
         onToken: (chunk) => {
+          // Close the reasoning block once the real answer begins streaming.
+          if (thinkingStarted && !streamStarted) {
+            this.ui.thinkingEnd?.();
+          }
+
           if (!streamStarted) {
             this.ui.assistantStart?.();
             streamStarted = true;

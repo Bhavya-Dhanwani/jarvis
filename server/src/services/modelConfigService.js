@@ -46,6 +46,9 @@ export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
     maxAutoContinuations: Number(env.JARVIS_OLLAMA_MAX_CONTINUATIONS ?? tuning.maxAutoContinuations),
     // Use gentle background warm-up by default; set JARVIS_OLLAMA_WARMUP=false to disable.
     warmOnStart: !isDisabled(env.JARVIS_OLLAMA_WARMUP),
+    // Stream the model's reasoning ("Thinking...") by default; auto-disables if the
+    // model has no thinking mode. Set JARVIS_OLLAMA_THINK=false to turn it off.
+    think: !isDisabled(env.JARVIS_OLLAMA_THINK),
     // Expose where the active model came from for diagnostics.
     source: savedConfig?.source ?? (env.JARVIS_OLLAMA_MODEL ? 'env' : 'recommendation'),
   };

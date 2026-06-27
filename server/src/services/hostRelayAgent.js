@@ -27,6 +27,7 @@ export async function handleRelayCall({ frame, ollamaService, send }) {
     if (method === 'generateReply') {
       const reply = await ollamaService.generateReply(args.messages ?? [], {
         onToken: (chunk) => send({ type: 'token', id, chunk }),
+        onThinking: (chunk) => send({ type: 'thinking', id, chunk }),
         generationOptions: args.generationOptions ?? {},
         maxContinuations: args.maxContinuations ?? null,
       });

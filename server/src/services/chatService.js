@@ -102,7 +102,7 @@ export class ChatService {
   }
 
   // Save a user message and optionally generate an assistant reply.
-  async respondToUserMessage(chatId, content, { onToken = null } = {}) {
+  async respondToUserMessage(chatId, content, { onToken = null, onThinking = null } = {}) {
     // Persist the user's message first.
     const userMessage = this.saveUserMessage(chatId, content);
 
@@ -114,8 +114,8 @@ export class ChatService {
 
     // Load full chat history for the assistant.
     const messages = this.messageRepository.listByChatId(chatId);
-    // Generate a reply from the assistant service.
-    const reply = await this.assistantService.generateReply(messages, { onToken });
+    // Generate a reply from the assistant service, streaming reasoning + answer.
+    const reply = await this.assistantService.generateReply(messages, { onToken, onThinking });
     // Save the assistant reply, preserving empty responses visibly.
     const assistantMessage = this.saveAssistantMessage(chatId, reply || '(empty response)');
 

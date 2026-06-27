@@ -86,7 +86,7 @@ export class OllamaService {
   }
 
   // Generate an assistant reply from chat history.
-  async generateReply(messages, { onToken = null, generationOptions = {}, maxContinuations = null } = {}) {
+  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null } = {}) {
     const localReply = createLocalFastReply(messages);
 
     if (localReply) {
@@ -110,14 +110,30 @@ export class OllamaService {
       ?? DEFAULT_MAX_AUTO_CONTINUATIONS);
 
     for (let attempt = 0; attempt <= continuationLimit; attempt++) {
-      const result = await sendChatRequestWithEmptyRetry({
-        host: this.config.host,
-        model: this.config.model,
-        keepAlive: this.config.keepAlive,
-        messages: requestMessages,
-        options,
-        onToken,
-      }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
+      let result;
+
+      try {
+        result = await sendChatRequestWithEmptyRetry({
+          host: this.config.host,
+          model: this.config.model,
+          keepAlive: this.config.keepAlive,
+          messages: requestMessages,
+          options,
+          onToken,
+          onThinking,
+          think: this.#thinkEnabled(),
+        }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
+      } catch (error) {
+        // If the model rejects the think flag, disable it for this process and retry
+        // so chat keeps working on models without a reasoning/thinking mode.
+        if (this.#thinkEnabled() && isThinkingUnsupported(error)) {
+          this.thinkDisabled = true;
+          attempt -= 1;
+          continue;
+        }
+
+        throw error;
+      }
 
       reply += result.reply;
 
@@ -133,6 +149,12 @@ export class OllamaService {
     }
 
     return reply.trim();
+  }
+
+  // Whether to ask Ollama to stream the model's reasoning (default on; disabled if the
+  // configured model turns out not to support it).
+  #thinkEnabled() {
+    return (this.config.think ?? true) && this.thinkDisabled !== true;
   }
 }
 
@@ -173,7 +195,7 @@ function createEmptyResponseRetryMessages(messages) {
 }
 
 // Send one Ollama chat request.
-async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, tools = [], allowToolCalls = false }) {
+async function sendChatRequest({ host, model, keepAlive, messages, options, onToken, onThinking, think = false, tools = [], allowToolCalls = false }) {
   const response = await fetch(`${host}/api/chat`, {
     method: 'POST',
     headers: createOllamaFetchHeaders(host),
@@ -183,6 +205,8 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
       stream: typeof onToken === 'function',
       keep_alive: keepAlive ?? '2m',
       options,
+      // Ask the model to stream its reasoning separately (shown as "Thinking...").
+      ...(think ? { think: true } : {}),
       ...(tools.length > 0 ? { tools } : {}),
     }),
   }).catch((error) => {
@@ -195,7 +219,7 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
   }
 
   if (typeof onToken === 'function') {
-    return readStreamingReply(response, onToken);
+    return readStreamingReply(response, onToken, onThinking);
   }
 
   const payload = await response.json();
@@ -351,12 +375,25 @@ async function drainResponse(response) {
 }
 
 // Read Ollama's newline-delimited streaming response.
-async function readStreamingReply(response, onToken) {
+async function readStreamingReply(response, onToken, onThinking = null) {
   const decoder = new TextDecoder();
   const reader = response.body.getReader();
   let buffer = '';
   let reply = '';
   let stoppedByLength = false;
+
+  const emit = (parsed) => {
+    stoppedByLength = stoppedByLength || parsed.stoppedByLength;
+
+    if (parsed.thinking && typeof onThinking === 'function') {
+      onThinking(parsed.thinking);
+    }
+
+    if (parsed.content) {
+      reply += parsed.content;
+      onToken(parsed.content);
+    }
+  };
 
   while (true) {
     const { value, done } = await reader.read();
@@ -370,28 +407,11 @@ async function readStreamingReply(response, onToken) {
     buffer = lines.pop() ?? '';
 
     for (const line of lines) {
-      const parsed = parseStreamLine(line, { hasReply: reply.length > 0 });
-      const chunk = parsed.content;
-
-      if (!chunk) {
-        stoppedByLength = stoppedByLength || parsed.stoppedByLength;
-        continue;
-      }
-
-      reply += chunk;
-      onToken(chunk);
-      stoppedByLength = stoppedByLength || parsed.stoppedByLength;
+      emit(parseStreamLine(line, { hasReply: reply.length > 0 }));
     }
   }
 
-  const parsedTail = parseStreamLine(buffer, { hasReply: reply.length > 0 });
-  const tail = parsedTail.content;
-  stoppedByLength = stoppedByLength || parsedTail.stoppedByLength;
-
-  if (tail) {
-    reply += tail;
-    onToken(tail);
-  }
+  emit(parseStreamLine(buffer, { hasReply: reply.length > 0 }));
 
   if (!reply.trim()) {
     throw createEmptyResponseError();
@@ -408,7 +428,7 @@ function parseStreamLine(line, { hasReply = false } = {}) {
   const trimmed = line.trim();
 
   if (!trimmed) {
-    return { content: '', stoppedByLength: false };
+    return { content: '', thinking: '', stoppedByLength: false };
   }
 
   const payload = JSON.parse(trimmed);
@@ -423,8 +443,15 @@ function parseStreamLine(line, { hasReply = false } = {}) {
 
   return {
     content: payload.message?.content ?? '',
+    // Thinking-capable models stream their reasoning in a separate `thinking` field.
+    thinking: payload.message?.thinking ?? '',
     stoppedByLength: payload.done_reason === 'length',
   };
+}
+
+// Detect an Ollama error that means the model has no thinking/reasoning mode.
+function isThinkingUnsupported(error) {
+  return /think/i.test(error?.message ?? '');
 }
 
 // Let the coding scheduler retry occasional blank generations from a loaded model.

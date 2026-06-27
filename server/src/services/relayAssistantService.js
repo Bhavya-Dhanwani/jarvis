@@ -36,12 +36,12 @@ export class RelayAssistantService {
     await this.#call('warmUp', {});
   }
 
-  async generateReply(messages, { onToken = null, generationOptions = {}, maxContinuations = null } = {}) {
+  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null } = {}) {
     const reply = await this.#call('generateReply', {
       messages,
       generationOptions,
       maxContinuations,
-    }, onToken);
+    }, { onToken, onThinking });
 
     return typeof reply === 'string' ? reply : '';
   }
@@ -78,13 +78,13 @@ export class RelayAssistantService {
     }
   }
 
-  async #call(method, args, onToken = null) {
+  async #call(method, args, { onToken = null, onThinking = null } = {}) {
     await this.#ensureSocket();
 
     const id = String(this.#nextId++);
 
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject, onToken });
+      this.#pending.set(id, { resolve, reject, onToken, onThinking });
       this.#send({ type: 'call', id, method, args });
     });
   }
@@ -148,6 +148,13 @@ export class RelayAssistantService {
     const entry = frame.id ? this.#pending.get(frame.id) : null;
 
     if (!entry) {
+      return;
+    }
+
+    if (frame.type === 'thinking') {
+      if (typeof entry.onThinking === 'function' && frame.chunk) {
+        entry.onThinking(frame.chunk);
+      }
       return;
     }
 

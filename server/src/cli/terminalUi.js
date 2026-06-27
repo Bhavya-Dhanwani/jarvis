@@ -48,6 +48,19 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       return withSpinner('Warming local model', action, { output });
     },
 
+    thinkingStart() {
+      output.write(`${theme.dim('Thinking...')}\n`);
+    },
+
+    thinkingChunk(chunk) {
+      // Render reasoning dimmed so it reads as background context, not the answer.
+      output.write(theme.dim(chunk));
+    },
+
+    thinkingEnd() {
+      output.write(`\n${theme.dim('...done thinking')}\n\n`);
+    },
+
     assistantStart() {
       output.write(`${theme.cyan('JARVIS')} ${theme.dim('>')} `);
     },

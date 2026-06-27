@@ -116,6 +116,28 @@ test('generateToolTurn resolves with the host message', async () => {
   service.close();
 });
 
+test('thinking frames are delivered to onThinking, separate from the reply', async () => {
+  const { service, sockets } = makeService();
+  const thinking = [];
+  const tokens = [];
+  const replyPromise = service.generateReply([{ role: 'user', content: 'why' }], {
+    onToken: (chunk) => tokens.push(chunk),
+    onThinking: (chunk) => thinking.push(chunk),
+  });
+
+  const socket = await waitForSend(sockets);
+  const call = socket.sent[0];
+
+  socket.receive({ type: 'thinking', id: call.id, chunk: 'let me think' });
+  socket.receive({ type: 'token', id: call.id, chunk: 'answer' });
+  socket.receive({ type: 'result', id: call.id, value: 'answer' });
+
+  assert.equal(await replyPromise, 'answer');
+  assert.deepEqual(thinking, ['let me think']);
+  assert.deepEqual(tokens, ['answer']);
+  service.close();
+});
+
 test('an error frame rejects the pending call', async () => {
   const { service, sockets } = makeService();
   const promise = service.generateReply([{ role: 'user', content: 'x' }]);

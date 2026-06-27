@@ -369,3 +369,81 @@ test('ollama service waits for background warm-up before model requests', async 
   }
 });
 
+
+// Verify reasoning is streamed separately from the answer and think:true is requested.
+test('generateReply streams thinking separately and requests think mode', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody = null;
+
+  globalThis.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    const lines = [
+      JSON.stringify({ message: { thinking: 'Let me ' } }),
+      JSON.stringify({ message: { thinking: 'reason.' } }),
+      JSON.stringify({ message: { content: 'Hello' } }),
+      JSON.stringify({ message: { content: ' world' } }),
+      JSON.stringify({ message: { content: '' }, done: true, done_reason: 'stop' }),
+    ].join('\n') + '\n';
+    return new Response(lines);
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+      warmOnStart: false,
+      think: true,
+    });
+
+    const thinking = [];
+    const tokens = [];
+    const reply = await service.generateReply([
+      { role: 'user', content: 'explain something to me' },
+    ], {
+      onToken: (chunk) => tokens.push(chunk),
+      onThinking: (chunk) => thinking.push(chunk),
+    });
+
+    assert.equal(reply, 'Hello world');
+    assert.equal(thinking.join(''), 'Let me reason.');
+    assert.equal(tokens.join(''), 'Hello world');
+    assert.equal(sentBody.think, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify a model that rejects thinking falls back and still answers.
+test('generateReply retries without think when the model rejects it', async () => {
+  const originalFetch = globalThis.fetch;
+  const sentThinkFlags = [];
+
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sentThinkFlags.push(body.think === true);
+
+    if (body.think === true) {
+      return new Response('"gemma" does not support thinking', { status: 400 });
+    }
+
+    return new Response(`${JSON.stringify({ message: { content: 'ok' }, done: true, done_reason: 'stop' })}\n`);
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+      warmOnStart: false,
+      think: true,
+    });
+
+    const reply = await service.generateReply([{ role: 'user', content: 'plain question here' }]);
+
+    assert.equal(reply, 'ok');
+    assert.deepEqual(sentThinkFlags, [true, false]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

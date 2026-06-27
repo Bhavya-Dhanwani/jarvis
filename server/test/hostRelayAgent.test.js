@@ -35,6 +35,31 @@ test('handleRelayCall streams generateReply tokens then a result frame', async (
   ]);
 });
 
+test('handleRelayCall forwards reasoning as thinking frames before the answer', async () => {
+  const { frames, send } = createCapture();
+  const ollamaService = {
+    generateReply: async (_messages, { onToken, onThinking }) => {
+      onThinking('reasoning ');
+      onThinking('here');
+      onToken('answer');
+      return 'answer';
+    },
+  };
+
+  await handleRelayCall({
+    frame: { id: '11', method: 'generateReply', args: { messages: [] } },
+    ollamaService,
+    send,
+  });
+
+  assert.deepEqual(frames, [
+    { type: 'thinking', id: '11', chunk: 'reasoning ' },
+    { type: 'thinking', id: '11', chunk: 'here' },
+    { type: 'token', id: '11', chunk: 'answer' },
+    { type: 'result', id: '11', value: 'answer' },
+  ]);
+});
+
 test('handleRelayCall returns the message for generateToolTurn', async () => {
   const { frames, send } = createCapture();
   const message = { role: 'assistant', content: '', tool_calls: [{ name: 'read' }] };
