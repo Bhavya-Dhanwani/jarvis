@@ -109,6 +109,11 @@ export class OllamaService {
       ?? this.config.maxAutoContinuations
       ?? DEFAULT_MAX_AUTO_CONTINUATIONS);
 
+    // Decide whether to stream reasoning this turn: an explicit override wins (the
+    // coding agent passes false); otherwise reasoning is enabled in config AND only
+    // for complex prompts, so short/casual messages skip the ~10s reasoning step.
+    let wantThink = this.#shouldThink(think, latestUserContent(messages));
+
     for (let attempt = 0; attempt <= continuationLimit; attempt++) {
       let result;
 
@@ -121,13 +126,14 @@ export class OllamaService {
           options,
           onToken,
           onThinking,
-          think: this.#thinkEnabled(think),
+          think: wantThink,
         }, { maxEmptyRetries: this.config.maxEmptyResponseRetries });
       } catch (error) {
         // If the model rejects the think flag, disable it for this process and retry
         // so chat keeps working on models without a reasoning/thinking mode.
-        if (this.#thinkEnabled(think) && isThinkingUnsupported(error)) {
+        if (wantThink && isThinkingUnsupported(error)) {
           this.thinkDisabled = true;
+          wantThink = false;
           attempt -= 1;
           continue;
         }
@@ -151,12 +157,41 @@ export class OllamaService {
     return reply.trim();
   }
 
-  // Whether to ask Ollama to stream the model's reasoning. Per-call override wins over
-  // the config default; auto-disabled if the model turns out to have no thinking mode.
-  #thinkEnabled(override = null) {
-    const want = override === null ? (this.config.think ?? true) : override;
-    return want && this.thinkDisabled !== true;
+  // Whether to ask Ollama to stream the model's reasoning for this turn. An explicit
+  // override wins; otherwise reasoning is on only when enabled in config AND the prompt
+  // is complex enough to benefit. Auto-disabled if the model has no thinking mode.
+  #shouldThink(override, content) {
+    if (this.thinkDisabled === true) {
+      return false;
+    }
+
+    if (override !== null && override !== undefined) {
+      return Boolean(override);
+    }
+
+    return (this.config.think ?? true) && isComplexPrompt(content);
   }
+}
+
+// Get the most recent user message text from a history array.
+function latestUserContent(messages) {
+  return [...messages].reverse().find((message) => message.role === 'user')?.content ?? '';
+}
+
+// A prompt is "complex" enough to warrant visible reasoning when it is not a trivial
+// greeting and is either a longer message or a coding-style request.
+function isComplexPrompt(content) {
+  const text = String(content ?? '').trim();
+
+  if (!text || isSimplePrompt(text)) {
+    return false;
+  }
+
+  if (isCodingPrompt(text)) {
+    return true;
+  }
+
+  return text.split(/\s+/).length >= 8;
 }
 
 async function sendChatRequestWithEmptyRetry(params, { maxEmptyRetries = DEFAULT_EMPTY_RESPONSE_RETRIES } = {}) {

@@ -1,8 +1,9 @@
 // Import Ollama model helpers.
 import { getOllamaModels, hasModel, pullModel } from './ollama.js';
 
-// Define the default model requested for first-run setup.
-export const DEFAULT_MODEL = 'gemma4:e4b';
+// Define the default model requested for first-run setup. This is a static fallback;
+// the setup wizard normally picks the model that fits the detected machine.
+export const DEFAULT_MODEL = 'qwen3:4b';
 
 // Ensure the selected model is installed before setup completes.
 export async function ensureModel(model, prompts, { output = process.stdout } = {}) {

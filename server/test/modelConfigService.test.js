@@ -73,41 +73,41 @@ test('model config uses gentle startup warm-up unless explicitly disabled', () =
 
 // Verify generation settings adapt to the detected memory profile.
 test('model config tunes streaming settings from system profile', () => {
-  // Build configs across the recommendation tiers.
-  const compact = createModelConfig({ totalMemoryGb: 8, env: missingConfigEnv() });
-  const small = createModelConfig({ totalMemoryGb: 16, env: missingConfigEnv() });
-  const medium = createModelConfig({ totalMemoryGb: 32, env: missingConfigEnv() });
-  const large = createModelConfig({ totalMemoryGb: 64, env: missingConfigEnv() });
+  // Build configs across the recommendation tiers (8/16/32/64 GB).
+  const small = createModelConfig({ totalMemoryGb: 8, env: missingConfigEnv() });
+  const medium = createModelConfig({ totalMemoryGb: 16, env: missingConfigEnv() });
+  const large = createModelConfig({ totalMemoryGb: 32, env: missingConfigEnv() });
+  const xlarge = createModelConfig({ totalMemoryGb: 64, env: missingConfigEnv() });
 
-  // Assert smaller systems favor faster visible chunks and shorter residency.
-  assert.deepEqual(pickTuning(compact), {
-    numBatch: 64,
-    codeChunkTokens: 256,
-    codeContext: 2048,
-    keepAlive: '1m',
-    maxAutoContinuations: 8,
-  });
-
-  // Assert each larger profile steps up capacity from the system check.
+  // 8 GB anchor (small tier, qwen3:4b).
   assert.deepEqual(pickTuning(small), {
-    numBatch: 128,
-    codeChunkTokens: 384,
-    codeContext: 2048,
-    keepAlive: '2m',
-    maxAutoContinuations: 12,
-  });
-  assert.deepEqual(pickTuning(medium), {
     numBatch: 256,
     codeChunkTokens: 512,
     codeContext: 4096,
-    keepAlive: '5m',
+    keepAlive: '30m',
+    maxAutoContinuations: 12,
+  });
+
+  // Assert each larger profile steps up capacity from the system check.
+  assert.deepEqual(pickTuning(medium), {
+    numBatch: 512,
+    codeChunkTokens: 768,
+    codeContext: 8192,
+    keepAlive: '30m',
     maxAutoContinuations: 14,
   });
   assert.deepEqual(pickTuning(large), {
     numBatch: 512,
-    codeChunkTokens: 768,
-    codeContext: 8192,
-    keepAlive: '10m',
+    codeChunkTokens: 1024,
+    codeContext: 16384,
+    keepAlive: '30m',
+    maxAutoContinuations: 16,
+  });
+  assert.deepEqual(pickTuning(xlarge), {
+    numBatch: 512,
+    codeChunkTokens: 1024,
+    codeContext: 32768,
+    keepAlive: '30m',
     maxAutoContinuations: 16,
   });
 });

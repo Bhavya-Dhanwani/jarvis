@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, totalmem } from 'node:os';
 import { detectSystem } from './detectSystem.js';
+import { detectGpu, getModelRecommendation } from '../core/systemCheck.js';
 import {
   OLLAMA_HOST,
   getOllamaModels,
@@ -526,33 +527,31 @@ async function ensureOllamaServer(prompts, { output }) {
 
 async function ensureSelectedModel(prompts, { defaultModel, output }) {
   output.write(section('MODEL CORE'));
-  const selectedModel = await prompts.select('Select local model core', [
-    {
-      title: `${DEFAULT_MODEL}  Recommended`,
-      description: 'Gemma 4 edge model with stronger reasoning, coding, and agent workflows.',
-      value: DEFAULT_MODEL,
-    },
-    {
-      title: 'gemma4:e2b  Lightweight',
-      description: 'Smaller Gemma 4 edge model for lower-memory machines.',
-      value: 'gemma4:e2b',
-    },
-    {
-      title: 'gemma4:12b  Workstation',
-      description: 'Higher-capability Gemma 4 model for stronger local hardware.',
-      value: 'gemma4:12b',
-    },
-    {
-      title: 'gemma3:1b  Gemma 3 fallback',
-      description: 'Older compact option when Gemma 4 is too large.',
-      value: 'gemma3:1b',
-    },
-    {
-      title: `${defaultModel}  Environment default`,
-      description: 'Use JARVIS_OLLAMA_MODEL from your environment.',
-      value: defaultModel,
-    },
-  ], { initial: 0 });
+
+  // Detect this machine's RAM + GPU and pick the matching model tier.
+  const totalGb = Math.max(1, Math.round(totalmem() / 1024 / 1024 / 1024));
+  const gpu = await detectGpu();
+  const recommendation = getModelRecommendation(totalGb, { gpu: gpu.available });
+  const { main, coding, fast } = recommendation.models;
+
+  output.write(statusLine('info', 'Detected hardware', `${totalGb} GB RAM · ${gpu.available ? gpu.name : 'CPU only'} · ${recommendation.size} tier`));
+
+  // Build the model choices from the tier so each machine sees models that fit.
+  const options = [];
+  const seen = new Set();
+  const add = (value, title, description) => {
+    if (value && !seen.has(value)) {
+      seen.add(value);
+      options.push({ title, description, value });
+    }
+  };
+
+  add(main, `${main}  Recommended`, 'Best all-rounder for this machine: code + tool-calling (MCP) + reasoning.');
+  add(coding, `${coding}  Coding`, 'Sharper at pure /code tasks; faster, no reasoning mode.');
+  add(fast, `${fast}  Fast`, 'Lightest model for maximum speed and light automation.');
+  add(defaultModel, `${defaultModel}  Environment default`, 'Use JARVIS_OLLAMA_MODEL from your environment.');
+
+  const selectedModel = await prompts.select('Select local model core', options, { initial: 0 });
 
   const list = await withSpinner('Scanning installed model cores', () => getOllamaModels(), { output });
 

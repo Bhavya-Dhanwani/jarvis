@@ -11,8 +11,8 @@ import { join } from 'node:path';
 export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
   // Choose a recommendation from provided or detected memory.
   const recommendation = getModelRecommendation(totalMemoryGb ?? getMemoryFromProcess());
-  // Choose runtime streaming settings from the detected system profile.
-  const tuning = getRuntimeTuning(recommendation);
+  // Streaming/continuation tuning travels with the recommendation tier.
+  const tuning = recommendation.tuning;
   // Load the model saved by the setup wizard when available.
   const savedConfig = loadSavedModelConfig({ env });
 
@@ -51,43 +51,6 @@ export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
     think: !isDisabled(env.JARVIS_OLLAMA_THINK),
     // Expose where the active model came from for diagnostics.
     source: savedConfig?.source ?? (env.JARVIS_OLLAMA_MODEL ? 'env' : 'recommendation'),
-  };
-}
-
-// Derive streaming and continuation behavior from the system recommendation.
-function getRuntimeTuning(recommendation) {
-  if (recommendation.size === 'large') {
-    return {
-      numBatch: 512,
-      codeChunkTokens: 768,
-      keepAlive: '10m',
-      maxAutoContinuations: 16,
-    };
-  }
-
-  if (recommendation.size === 'medium') {
-    return {
-      numBatch: 256,
-      codeChunkTokens: 512,
-      keepAlive: '5m',
-      maxAutoContinuations: 14,
-    };
-  }
-
-  if (recommendation.size === 'small') {
-    return {
-      numBatch: 128,
-      codeChunkTokens: 384,
-      keepAlive: '2m',
-      maxAutoContinuations: 12,
-    };
-  }
-
-  return {
-    numBatch: 64,
-    codeChunkTokens: 256,
-    keepAlive: '1m',
-    maxAutoContinuations: 8,
   };
 }
 

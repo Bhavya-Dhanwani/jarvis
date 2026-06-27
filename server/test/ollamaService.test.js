@@ -399,7 +399,7 @@ test('generateReply streams thinking separately and requests think mode', async 
     const thinking = [];
     const tokens = [];
     const reply = await service.generateReply([
-      { role: 'user', content: 'explain something to me' },
+      { role: 'user', content: 'explain to me in detail how recursion works in programming please' },
     ], {
       onToken: (chunk) => tokens.push(chunk),
       onThinking: (chunk) => thinking.push(chunk),
@@ -439,10 +439,39 @@ test('generateReply retries without think when the model rejects it', async () =
       think: true,
     });
 
-    const reply = await service.generateReply([{ role: 'user', content: 'plain question here' }]);
+    const reply = await service.generateReply([{ role: 'user', content: 'please write a detailed explanation of how event loops work internally' }]);
 
     assert.equal(reply, 'ok');
     assert.deepEqual(sentThinkFlags, [true, false]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify short/casual prompts skip reasoning so they don't pay the thinking delay.
+test('generateReply skips think mode for short casual prompts', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentBody = null;
+
+  globalThis.fetch = async (_url, init) => {
+    sentBody = JSON.parse(init.body);
+    return new Response(`${JSON.stringify({ message: { content: 'hey!' }, done: true, done_reason: 'stop' })}\n`);
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+      warmOnStart: false,
+      think: true,
+    });
+
+    await service.generateReply([{ role: 'user', content: 'yo bro how are you' }], {
+      onToken: () => {},
+    });
+
+    assert.equal(sentBody.think, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
