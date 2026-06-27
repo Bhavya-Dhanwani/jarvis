@@ -52,8 +52,9 @@ test('request options strip internal Jarvis tuning keys', () => {
     { role: 'user', content: 'write a program of N Queens in js' },
   ]);
 
-  // Assert the internal fields were consumed before sending to Ollama.
-  assert.equal(options.num_ctx, 3072);
+  // num_ctx stays fixed at the session value (changing it would reload the model);
+  // only num_predict adapts. Internal tuning keys are stripped before sending.
+  assert.equal(options.num_ctx, 2048);
   assert.equal(options.num_predict, 512);
   assert.equal('code_num_ctx' in options, false);
   assert.equal('code_num_predict' in options, false);
@@ -308,8 +309,10 @@ test('ollama service warms a model only once concurrently', async () => {
 
     assert.equal(requests, 1);
     assert.equal(requestBodies[0].keep_alive, '30s');
-    assert.equal(requestBodies[0].options.num_ctx, 1024);
-    assert.equal(requestBodies[0].options.num_batch, 32);
+    // Warm-up loads the model at the SAME num_ctx/num_batch as real requests so the
+    // first prompt does not force a reload; only num_predict is shrunk to 1.
+    assert.equal(requestBodies[0].options.num_ctx, 4096);
+    assert.equal(requestBodies[0].options.num_batch, 512);
     assert.equal(requestBodies[0].options.num_predict, 1);
   } finally {
     globalThis.fetch = originalFetch;

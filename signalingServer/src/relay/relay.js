@@ -28,6 +28,9 @@ export function attachRelay(server) {
             return;
         }
 
+        // Flush each frame immediately so streamed tokens are not batched by Nagle.
+        socket._socket?.setNoDelay?.(true);
+
         const { role, userId } = auth;
 
         if (role === "host") {

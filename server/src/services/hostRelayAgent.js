@@ -93,6 +93,8 @@ export function createHostRelayAgent({
     socket = new WebSocketImpl(url);
 
     socket.on('open', () => {
+      // Flush each token frame immediately instead of letting Nagle batch them.
+      socket._socket?.setNoDelay?.(true);
       output('success', 'Relay online', 'host connected; clients can reach this machine');
     });
 

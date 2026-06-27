@@ -439,6 +439,9 @@ async function runHostRelay({ context, env, auth, hostModelConfig, refresh, outp
     getAccessToken,
     ollamaService,
     warm: () => warm(hostModelConfig),
+    // Re-warm well within the 30m keep_alive but rarely enough to never queue behind
+    // an active chat. Real requests also refresh keep_alive, so this is an idle guard.
+    warmIntervalMs: context.hostWarmIntervalMs ?? 600000,
     output: (level, title, detail) => output(statusLine(level, title, detail)),
   });
 
@@ -860,6 +863,9 @@ async function warmLocalModel(modelConfig) {
         prompt: '',
         stream: false,
         keep_alive: '30m',
+        // Preload at the same num_ctx/num_batch the chat requests use, otherwise the
+        // first real prompt changes a load-time parameter and Ollama reloads the model.
+        options: warmLoadOptions(modelConfig.options),
       }),
     });
 
@@ -867,6 +873,21 @@ async function warmLocalModel(modelConfig) {
   } catch {
     return false;
   }
+}
+
+// Pick only the load-time options so the host preload matches real request loads.
+function warmLoadOptions(options = {}) {
+  const loadOptions = { num_predict: 1 };
+
+  if (options.num_ctx !== undefined) {
+    loadOptions.num_ctx = Number(options.num_ctx);
+  }
+
+  if (options.num_batch !== undefined) {
+    loadOptions.num_batch = Number(options.num_batch);
+  }
+
+  return loadOptions;
 }
 // Render coding workflow events through line output.
 function renderCodingEvent(event, output) {

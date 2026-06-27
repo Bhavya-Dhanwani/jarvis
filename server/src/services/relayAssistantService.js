@@ -117,7 +117,11 @@ export class RelayAssistantService {
       });
 
       await new Promise((resolve, reject) => {
-        socket.on('open', resolve);
+        socket.on('open', () => {
+          // Flush frames immediately so streamed tokens arrive without Nagle batching.
+          socket._socket?.setNoDelay?.(true);
+          resolve();
+        });
         socket.on('error', reject);
       });
     })();

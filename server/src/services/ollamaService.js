@@ -263,9 +263,11 @@ export function createRequestOptions(baseOptions = {}, messages = []) {
   }
 
   if (isCodingPrompt(content)) {
+    // Only num_predict (output budget) is tuned per prompt. num_ctx is a load-time
+    // parameter: changing it forces Ollama to unload and reload the model (minutes),
+    // so it stays fixed at the session value to keep the model resident.
     return {
       ...options,
-      num_ctx: Math.max(Number(baseOptions.code_num_ctx ?? options.num_ctx ?? 2048), 2048),
       num_predict: Number(baseOptions.code_num_predict ?? 384),
     };
   }
@@ -287,14 +289,15 @@ function stripJarvisOnlyOptions(options) {
   return ollamaOptions;
 }
 
-// Keep warm-up intentionally tiny; it should probe/load, not stress the machine.
+// Warm-up must load the model with the SAME num_ctx/num_batch as real requests, or
+// Ollama reloads the model on the first real prompt (and again on every prompt while
+// a periodic re-warm fights the request context). Only num_predict is shrunk to 1 so
+// the warm itself generates nothing; it is not a load-time parameter.
 function createWarmUpOptions(options) {
   const stripped = stripJarvisOnlyOptions(options);
 
   return {
     ...stripped,
-    num_ctx: Math.min(Number(stripped.num_ctx ?? 1024), 1024),
-    num_batch: Math.min(Number(stripped.num_batch ?? 32), 32),
     num_predict: 1,
   };
 }
