@@ -181,13 +181,16 @@ export class ChatLoopService {
     // Save and respond to the user message.
     try {
       let streamed = false;
-      let streamStarted = false;
-      let thinkingStarted = false;
+      let answerStarted = false;
 
       // Timing instrumentation to pinpoint where latency is (set JARVIS_TIMING=0 to hide).
       const sentAt = Date.now();
       let firstReasoningAt = null;
       let firstTokenAt = null;
+
+      // Start the blue thinking animation the instant the message is sent, before the
+      // model (or remote host) responds, so there is never a silent dead wait.
+      this.ui.replyWaiting?.();
 
       // Ask the chat service to persist and generate a reply.
       const { assistantMessage } = await this.chatService.respondToUserMessage(chatId, message, {
@@ -196,30 +199,23 @@ export class ChatLoopService {
             firstReasoningAt = Date.now();
           }
 
-          if (!thinkingStarted) {
-            this.ui.thinkingStart?.();
-            thinkingStarted = true;
-          }
-
-          this.ui.thinkingChunk?.(chunk);
+          // Reasoning streams into the live dimmed line; it is collapsed, never dumped.
+          this.ui.replyThinking?.(chunk);
         },
         onToken: (chunk) => {
           if (firstTokenAt === null) {
             firstTokenAt = Date.now();
           }
 
-          // Close the reasoning block once the real answer begins streaming.
-          if (thinkingStarted && !streamStarted) {
-            this.ui.thinkingEnd?.();
-          }
-
-          if (!streamStarted) {
-            this.ui.assistantStart?.();
-            streamStarted = true;
+          // The first answer token collapses reasoning to "thought for Ns" and opens
+          // the answer line.
+          if (!answerStarted) {
+            this.ui.replyAnswerStart?.();
+            answerStarted = true;
           }
 
           streamed = true;
-          this.ui.assistantChunk?.(chunk);
+          this.ui.replyAnswerChunk?.(chunk);
         },
       });
 
@@ -233,21 +229,24 @@ export class ChatLoopService {
       // Print assistant replies when present.
       if (assistantMessage) {
         if (streamed) {
-          this.ui.assistantEnd?.();
+          this.ui.replyEnd?.();
           return false;
         }
 
-        // Render the assistant message.
+        // No streamed tokens: stop the animation, then render the saved reply.
+        this.ui.replyStop?.();
         await this.ui.assistant(assistantMessage.content);
         // Keep the chat loop running.
         return false;
       }
 
       // Show saved feedback when no assistant reply exists.
+      this.ui.replyStop?.();
       this.ui.saved();
     // Keep the loop alive when the assistant is unavailable.
     } catch (error) {
-      // Render the assistant error message.
+      // Stop the animation and render the assistant error message.
+      this.ui.replyStop?.();
       this.ui.unavailable(error.message);
     }
 

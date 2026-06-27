@@ -318,7 +318,7 @@ async function sendChatRequest({ host, model, keepAlive, messages, options, onTo
 
   const payload = await response.json();
   const message = payload.message ?? {};
-  const reply = message.content ?? '';
+  const reply = stripThinkTags(message.content ?? '');
   const toolCalls = message.tool_calls ?? [];
 
   if (!reply && (!allowToolCalls || toolCalls.length === 0)) {
@@ -425,24 +425,63 @@ function isSimplePrompt(content) {
   return /^(hi|hii|hello|hey|yo|thanks|thank you|ok|okay|nice|cool)[\s!.?]*$/i.test(content.trim());
 }
 
+// Greeting/address/"how are you" filler words. A message made up entirely of these is
+// pure small talk, so it never needs the model (and must never trigger reasoning).
+const GREETING_WORDS = /\b(hi+|hey+|heyy+|hello+|yo+|sup|wsup|hiya|heya|howdy|gm|ge|good\s+(morning|evening|afternoon|day))\b/g;
+const ADDRESS_WORDS = /\b(bro|man|dude|buddy|mate|pal|sir|maam|jarvis|there|friend|fam|boss)\b/g;
+const HOWAREYOU_WORDS = /\b(how('?s| is| are| ya| have\s+you\s+been)?|what'?s\s+(up|good|new)|are|you|u|ya|it|is|going|things|doing|day|today|been|life|lately|all)\b/g;
+
+// Detect messages that are nothing but a casual greeting or "how are you", so they get an
+// instant friendly reply instead of waking the model. Shared by the intent router.
+export function isSmallTalk(content) {
+  const text = String(content ?? '').trim().toLowerCase();
+
+  if (!text || text.length > 60) {
+    return false;
+  }
+
+  if (/^(thanks|thank you|thx|ty|cheers)\b[\s!.?]*$/.test(text)) {
+    return true;
+  }
+
+  if (/^(ok|okay|k|kk|nice|cool|great|got it|gotcha|np|nvm|lol|haha)\b[\s!.?]*$/.test(text)) {
+    return true;
+  }
+
+  // Remove all greeting/address/"how are you" filler. If nothing meaningful is left and
+  // the message actually contained a greeting, it is pure small talk.
+  const stripped = text
+    .replace(GREETING_WORDS, ' ')
+    .replace(ADDRESS_WORDS, ' ')
+    .replace(HOWAREYOU_WORDS, ' ')
+    .replace(/[^a-z]+/g, '');
+  const hasGreeting = /\b(hi+|hey+|hello+|yo+|sup|hiya|heya|howdy|how|what'?s\s+(up|good|new))\b/.test(text);
+
+  return stripped.length === 0 && hasGreeting;
+}
+
 // Answer tiny social turns locally so the first prompt does not need to load the model.
 function createLocalFastReply(messages) {
   const latestUserMessage = [...messages].reverse().find((message) => message.role === 'user');
   const content = latestUserMessage?.content?.trim().toLowerCase() ?? '';
 
-  if (/^(hi|hii|hello|hey|yo)[\s!.?]*$/.test(content)) {
-    return 'Hi! How can I help?';
+  if (!isSmallTalk(content)) {
+    return null;
   }
 
-  if (/^(thanks|thank you)[\s!.?]*$/.test(content)) {
-    return 'You are welcome.';
+  if (/^(thanks|thank you|thx|ty|cheers)\b/.test(content)) {
+    return 'You are welcome!';
   }
 
-  if (/^(ok|okay|nice|cool)[\s!.?]*$/.test(content)) {
+  if (/^(ok|okay|k|kk|nice|cool|great|got it|gotcha|np|nvm|lol|haha)\b/.test(content)) {
     return 'Got it.';
   }
 
-  return null;
+  if (/\bhow\b|\bsup\b|\bwhat'?s\s+(up|good|new)\b/.test(content)) {
+    return "Hey! I'm doing great, thanks for asking. What can I help you with?";
+  }
+
+  return 'Hi! How can I help?';
 }
 
 // Detect prompts where a tiny output cap can cause blank or unusable answers.
@@ -468,6 +507,68 @@ async function drainResponse(response) {
   }
 }
 
+// Some models stream chain-of-thought inline as <think>...</think> inside the answer
+// content instead of Ollama's separate `thinking` field. Route that reasoning to the
+// thinking channel (dimmed + collapsed by the UI) so it never pollutes the real answer.
+// The router buffers across chunks so a tag split between reads is still detected.
+function createThinkTagRouter({ onAnswer, onThink }) {
+  const OPEN = '<think>';
+  const CLOSE = '</think>';
+  let inside = false;
+  let pending = '';
+
+  // Length of the trailing run of `text` that is a prefix of `tag` (a possible split tag).
+  const heldPrefix = (text, tag) => {
+    const max = Math.min(text.length, tag.length - 1);
+
+    for (let size = max; size > 0; size -= 1) {
+      if (text.slice(text.length - size) === tag.slice(0, size)) {
+        return size;
+      }
+    }
+
+    return 0;
+  };
+
+  const push = (text) => {
+    pending += text;
+
+    while (pending) {
+      const tag = inside ? CLOSE : OPEN;
+      const index = pending.indexOf(tag);
+
+      if (index !== -1) {
+        const before = pending.slice(0, index);
+        if (before) (inside ? onThink : onAnswer)(before);
+        pending = pending.slice(index + tag.length);
+        inside = !inside;
+        continue;
+      }
+
+      const hold = heldPrefix(pending, tag);
+      const ready = pending.slice(0, pending.length - hold);
+      if (ready) (inside ? onThink : onAnswer)(ready);
+      pending = pending.slice(pending.length - hold);
+      break;
+    }
+  };
+
+  const flush = () => {
+    if (pending) (inside ? onThink : onAnswer)(pending);
+    pending = '';
+  };
+
+  return { push, flush };
+}
+
+// Remove inline <think>...</think> reasoning from a non-streamed answer.
+function stripThinkTags(text) {
+  return String(text ?? '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<\/?think>/gi, '')
+    .trim();
+}
+
 // Read Ollama's newline-delimited streaming response.
 async function readStreamingReply(response, onToken, onThinking = null) {
   const decoder = new TextDecoder();
@@ -475,6 +576,18 @@ async function readStreamingReply(response, onToken, onThinking = null) {
   let buffer = '';
   let reply = '';
   let stoppedByLength = false;
+
+  const router = createThinkTagRouter({
+    onAnswer: (text) => {
+      reply += text;
+      onToken(text);
+    },
+    onThink: (text) => {
+      if (typeof onThinking === 'function') {
+        onThinking(text);
+      }
+    },
+  });
 
   const emit = (parsed) => {
     stoppedByLength = stoppedByLength || parsed.stoppedByLength;
@@ -484,8 +597,7 @@ async function readStreamingReply(response, onToken, onThinking = null) {
     }
 
     if (parsed.content) {
-      reply += parsed.content;
-      onToken(parsed.content);
+      router.push(parsed.content);
     }
   };
 
@@ -506,6 +618,7 @@ async function readStreamingReply(response, onToken, onThinking = null) {
   }
 
   emit(parseStreamLine(buffer, { hasReply: reply.length > 0 }));
+  router.flush();
 
   // Empty output is only a (retryable) failure when the model actually stopped. If it
   // hit the length limit, return so generateReply can continue from where it stopped.

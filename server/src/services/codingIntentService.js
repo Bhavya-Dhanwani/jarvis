@@ -1,3 +1,6 @@
+// Reuse the small-talk detector so casual greetings skip the routing model call too.
+import { isSmallTalk } from './ollamaService.js';
+
 // Decide whether a chat message should enter the coding workflow.
 export class CodingIntentService {
   // Store the existing assistant service.
@@ -85,9 +88,7 @@ function parseIntent(reply) {
   }
 }
 
-// Keep tiny social turns on the existing local fast path.
+// Keep tiny social turns on the existing local fast path (greetings, thanks, "how are you").
 function isSimpleConversation(message) {
-  return /^(hi|hii|hello|hey|yo|thanks|thank you|ok|okay|nice|cool)[\s!.?]*$/i.test(
-    String(message ?? '').trim(),
-  );
+  return isSmallTalk(message);
 }

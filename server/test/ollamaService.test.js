@@ -89,6 +89,96 @@ test('ollama service answers tiny greetings locally', async () => {
   }
 });
 
+// Verify casual "how are you" small talk is answered locally without waking the model.
+test('ollama service answers casual greetings locally', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () => {
+    throw new Error('fetch should not be called for casual small talk');
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    for (const greeting of ['yooo bro how are you ?', 'hey how are you doing today', 'sup']) {
+      const reply = await service.generateReply([{ role: 'user', content: greeting }], { onToken: () => {} });
+      assert.match(reply, /\w/);
+      assert.equal(/<think>/i.test(reply), false);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify a real request (not small talk) still reaches the model.
+test('ollama service does not localize real questions', async () => {
+  const originalFetch = globalThis.fetch;
+  let called = false;
+
+  globalThis.fetch = async () => {
+    called = true;
+    return new Response(`${JSON.stringify({ message: { content: 'An array is a list.' }, done: true, done_reason: 'stop' })}\n`);
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    const reply = await service.generateReply([{ role: 'user', content: 'how do I sort an array' }], { onToken: () => {} });
+
+    assert.equal(called, true);
+    assert.equal(reply, 'An array is a list.');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify inline <think>...</think> reasoning is routed to the thinking channel and kept
+// out of the answer, even when split across streaming chunks.
+test('generateReply routes inline think tags away from the answer', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () => new Response([
+    JSON.stringify({ message: { content: '<th' } }),
+    JSON.stringify({ message: { content: 'ink>let me ' } }),
+    JSON.stringify({ message: { content: 'reason</think>Here ' } }),
+    JSON.stringify({ message: { content: 'is the answer.' } }),
+    JSON.stringify({ message: { content: '' }, done: true, done_reason: 'stop' }),
+  ].join('\n') + '\n');
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'test-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+      think: true,
+    });
+
+    const thinking = [];
+    const tokens = [];
+    const reply = await service.generateReply([
+      { role: 'user', content: 'please explain in detail how a hash map resolves collisions internally' },
+    ], {
+      onToken: (chunk) => tokens.push(chunk),
+      onThinking: (chunk) => thinking.push(chunk),
+    });
+
+    assert.equal(reply, 'Here is the answer.');
+    assert.equal(tokens.join(''), 'Here is the answer.');
+    assert.equal(thinking.join(''), 'let me reason');
+    assert.equal(/<think>/i.test(reply), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // Verify streamed replies auto-continue when Ollama hits the token limit.
 test('ollama service streams automatic continuations', async () => {
   const originalFetch = globalThis.fetch;
@@ -531,7 +621,9 @@ test('generateReply skips think mode for short casual prompts', async () => {
       think: true,
     });
 
-    await service.generateReply([{ role: 'user', content: 'yo bro how are you' }], {
+    // A short non-greeting question (so it still hits the model rather than the local
+    // small-talk path) must explicitly disable reasoning.
+    await service.generateReply([{ role: 'user', content: 'do you like pizza' }], {
       onToken: () => {},
     });
 

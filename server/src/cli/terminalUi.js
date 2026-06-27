@@ -11,6 +11,8 @@ const execFileAsync = promisify(execFile);
 export function createTerminalUi({ output = process.stdout, cwd = process.cwd() } = {}) {
   // Animated, collapsible renderer for the coding agent workflow.
   const coding = createCodingRenderer(output);
+  // Animated, collapsing renderer for normal chat reasoning.
+  const chat = createChatThinkingRenderer(output);
 
   return {
     async renderHeader({ mode, chat, messageCount = 0, modelConfig }) {
@@ -53,30 +55,32 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       return withSpinner('Warming local model', action, { output });
     },
 
-    thinkingStart() {
-      output.write(`\n${theme.dim('Thinking...')}\n`);
+    // Start the blue thinking animation the instant the user sends a message.
+    replyWaiting() {
+      chat.waiting();
     },
 
-    thinkingChunk(chunk) {
-      // Render reasoning dimmed so it reads as background context, not the answer.
-      output.write(theme.dim(chunk));
+    // Stream reasoning into the live dimmed line (collapsed later, never dumped raw).
+    replyThinking(chunk) {
+      chat.thinking(chunk);
     },
 
-    thinkingEnd() {
-      output.write(`\n${theme.dim('...done thinking')}\n`);
+    // Collapse reasoning to "💭 thought for Ns" and open the answer line.
+    replyAnswerStart() {
+      chat.answerStart();
     },
 
-    assistantStart() {
-      // Leading blank line gives the answer breathing room from the prompt/reasoning.
-      output.write(`\n${theme.cyan('JARVIS')} ${theme.dim('>')} `);
+    replyAnswerChunk(chunk) {
+      chat.answerChunk(chunk);
     },
 
-    assistantChunk(chunk) {
-      output.write(chunk);
+    replyEnd() {
+      chat.end();
     },
 
-    assistantEnd() {
-      output.write('\n');
+    // Stop the animation when no streamed answer follows (errors / non-streamed replies).
+    replyStop() {
+      chat.stop();
     },
 
     // Dim, one-line latency breakdown to pinpoint where time goes. Hide with JARVIS_TIMING=0.
@@ -159,6 +163,109 @@ async function getGitBranch(cwd) {
 
 // Playful words cycled in the blue working spinner.
 const WORKING_VERBS = ['Thinking', 'Cooking', 'Reasoning', 'Planning', 'Crafting', 'Wiring', 'Building', 'Polishing'];
+
+// Normal chat-turn renderer: shows a blue animated spinner the moment a message is sent,
+// surfaces streamed reasoning live as a dimmed single line, then collapses it to
+// "💭 thought for Ns" once the answer begins. Falls back to plain text off a TTY.
+function createChatThinkingRenderer(output) {
+  const isTty = output.isTTY === true && typeof output.cursorTo === 'function';
+
+  let spinner = null;
+  let verbTimer = null;
+  let verbIndex = 0;
+  let startedAt = null;
+  let buffer = '';
+  let lastThought = '';
+  let thought = false;
+
+  const spinnerText = () => {
+    const verb = theme.info(`${WORKING_VERBS[verbIndex % WORKING_VERBS.length]}…`);
+    const note = lastThought ? theme.dim(` ${truncate(lastThought, 72)}`) : '';
+    const secs = startedAt ? theme.dim(` ${((Date.now() - startedAt) / 1000).toFixed(0)}s`) : '';
+    return `${verb}${note}${secs}`;
+  };
+
+  const refresh = () => {
+    if (spinner) {
+      spinner.text = spinnerText();
+    }
+  };
+
+  const stopTimer = () => {
+    if (verbTimer) {
+      clearInterval(verbTimer);
+      verbTimer = null;
+    }
+  };
+
+  const elapsed = () => (startedAt ? ((Date.now() - startedAt) / 1000).toFixed(1) : '0.0');
+
+  return {
+    // Start the animation as soon as the user submits, before the model responds.
+    waiting() {
+      startedAt = Date.now();
+      buffer = '';
+      lastThought = '';
+      thought = false;
+
+      if (!isTty || spinner) {
+        return;
+      }
+
+      spinner = ora({ text: spinnerText(), color: 'blue', spinner: 'dots', stream: output }).start();
+      verbTimer = setInterval(() => {
+        verbIndex += 1;
+        refresh();
+      }, 500);
+    },
+
+    // Feed streamed reasoning to the live dimmed line (kept to one line, not dumped).
+    thinking(chunk) {
+      thought = true;
+      buffer = (buffer + chunk).slice(-240);
+      const line = buffer.split('\n').map((value) => value.trim()).filter(Boolean).pop();
+      lastThought = line ?? lastThought;
+      refresh();
+    },
+
+    // Collapse reasoning to a single "thought for Ns" line, then open the answer.
+    answerStart() {
+      stopTimer();
+
+      if (spinner) {
+        if (thought) {
+          spinner.stopAndPersist({ symbol: theme.info('💭'), text: theme.dim(`thought for ${elapsed()}s`) });
+        } else {
+          spinner.stop();
+        }
+
+        spinner = null;
+      } else if (thought) {
+        output.write(`${theme.dim(`💭 thought for ${elapsed()}s`)}\n`);
+      }
+
+      output.write(`\n${theme.cyan('JARVIS')} ${theme.dim('>')} `);
+    },
+
+    answerChunk(chunk) {
+      output.write(chunk);
+    },
+
+    end() {
+      output.write('\n');
+    },
+
+    // Stop the animation without printing an answer (errors, or a non-streamed reply).
+    stop() {
+      stopTimer();
+
+      if (spinner) {
+        spinner.stop();
+        spinner = null;
+      }
+    },
+  };
+}
 
 // Coding-workflow renderer. On a TTY it shows a blue animated spinner that surfaces
 // live reasoning and per-file write progress, then collapses each agent to a one-line
