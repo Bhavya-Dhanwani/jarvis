@@ -89,6 +89,90 @@ test('ollama service answers tiny greetings locally', async () => {
   }
 });
 
+// Verify multi-model routing: an explicit role picks that role's model, and chat with no
+// role auto-routes (complex → main, simple → fast).
+test('generateReply routes by role and auto-routes chat by complexity', async () => {
+  const originalFetch = globalThis.fetch;
+  const sentModels = [];
+
+  globalThis.fetch = async (_url, init) => {
+    sentModels.push(JSON.parse(init.body).model);
+    return new Response(`${JSON.stringify({ message: { content: 'ok' }, done: true, done_reason: 'stop' })}\n`);
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'main-model',
+      models: { main: 'main-model', coding: 'coding-model', fast: 'fast-model' },
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    // Explicit role wins.
+    await service.generateReply([{ role: 'user', content: 'do the thing' }], { role: 'coding' });
+    // Chat, complex prompt (>= 8 words) → main.
+    await service.generateReply([{ role: 'user', content: 'please explain in detail how recursion works in functional programming' }]);
+    // Chat, short prompt → fast.
+    await service.generateReply([{ role: 'user', content: 'define recursion' }]);
+
+    assert.deepEqual(sentModels, ['coding-model', 'main-model', 'fast-model']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify generateToolTurn defaults to the coding model.
+test('generateToolTurn runs the coding model by default', async () => {
+  const originalFetch = globalThis.fetch;
+  let sentModel = null;
+
+  globalThis.fetch = async (_url, init) => {
+    sentModel = JSON.parse(init.body).model;
+    return new Response(JSON.stringify({ message: { role: 'assistant', content: 'done' }, done: true }));
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'main-model',
+      models: { main: 'main-model', coding: 'coding-model', fast: 'fast-model' },
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    await service.generateToolTurn([{ role: 'user', content: 'edit index.html' }], { tools: [] });
+
+    assert.equal(sentModel, 'coding-model');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify a single-model setup (no models map) routes every role to the one model.
+test('generateReply falls back to the single model when no roles are configured', async () => {
+  const originalFetch = globalThis.fetch;
+  const sentModels = [];
+
+  globalThis.fetch = async (_url, init) => {
+    sentModels.push(JSON.parse(init.body).model);
+    return new Response(`${JSON.stringify({ message: { content: 'ok' }, done: true, done_reason: 'stop' })}\n`);
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'only-model',
+      options: { num_ctx: 2048, num_predict: 64 },
+    });
+
+    await service.generateReply([{ role: 'user', content: 'do the thing' }], { role: 'coding' });
+    await service.generateReply([{ role: 'user', content: 'define recursion' }]);
+
+    assert.deepEqual(sentModels, ['only-model', 'only-model']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 // Verify casual "how are you" small talk is answered locally without waking the model.
 test('ollama service answers casual greetings locally', async () => {
   const originalFetch = globalThis.fetch;
@@ -432,6 +516,35 @@ test('generateToolTurn falls back when the model rejects think', async () => {
 
     assert.equal(message.content, 'done');
     assert.deepEqual(sentThinkValues, [false, undefined]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// Verify multi-model warm-up preloads every distinct role model so routing never pays a
+// cold load on first use.
+test('warmUp preloads all distinct role models', async () => {
+  const originalFetch = globalThis.fetch;
+  const warmedModels = [];
+
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith('/api/generate')) {
+      warmedModels.push(JSON.parse(init.body).model);
+    }
+    return new Response('{"done":true}\n');
+  };
+
+  try {
+    const service = new OllamaService({
+      host: 'http://127.0.0.1:11434',
+      model: 'main-model',
+      models: { main: 'main-model', coding: 'coding-model', fast: 'fast-model' },
+      options: { num_ctx: 2048, num_predict: 1 },
+    });
+
+    await service.warmUp();
+
+    assert.deepEqual(warmedModels.sort(), ['coding-model', 'fast-model', 'main-model']);
   } finally {
     globalThis.fetch = originalFetch;
   }

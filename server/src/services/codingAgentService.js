@@ -195,6 +195,8 @@ function createModelWorkerPool(assistantService) {
 
     const output = await assistantService.generateReply(messages, isReasoner
       ? {
+        // Planner/PRD reason about the task, so use the main (reasoning) model.
+        role: 'main',
         generationOptions: { num_predict: 256 },
         maxContinuations: 4,
         think: true,
@@ -208,7 +210,8 @@ function createModelWorkerPool(assistantService) {
           context.onEvent?.({ type: 'agent.thinking', agent, chunk });
         },
       }
-      : { think: false });
+      // Implementation-style agents without a tool loop still write code: use the coding model.
+      : { role: 'coding', think: false });
 
     if (thinkStartedAt !== null) {
       context.onEvent?.({

@@ -941,25 +941,40 @@ async function warmLocalModel(modelConfig) {
     return false;
   }
 
-  try {
-    const response = await fetch(`${modelConfig.host}/api/generate`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: modelConfig.model,
-        prompt: '',
-        stream: false,
-        keep_alive: '30m',
-        // Preload at the same num_ctx/num_batch the chat requests use, otherwise the
-        // first real prompt changes a load-time parameter and Ollama reloads the model.
-        options: warmLoadOptions(modelConfig.options),
-      }),
-    });
+  // Keep every distinct role model resident (multi-model routing), so coding/fast don't
+  // unload between requests. Single-model setups warm just the one model.
+  const models = [...new Set([
+    modelConfig.model,
+    modelConfig.models?.main,
+    modelConfig.models?.coding,
+    modelConfig.models?.fast,
+  ].filter(Boolean))];
 
-    return response.ok;
-  } catch {
-    return false;
+  let warmedAny = false;
+
+  for (const model of models) {
+    try {
+      const response = await fetch(`${modelConfig.host}/api/generate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt: '',
+          stream: false,
+          keep_alive: '30m',
+          // Preload at the same num_ctx/num_batch the chat requests use, otherwise the
+          // first real prompt changes a load-time parameter and Ollama reloads the model.
+          options: warmLoadOptions(modelConfig.options),
+        }),
+      });
+
+      warmedAny = warmedAny || response.ok;
+    } catch {
+      // Keep warming the remaining models even if one fails.
+    }
   }
+
+  return warmedAny;
 }
 
 // Pick only the load-time options so the host preload matches real request loads.

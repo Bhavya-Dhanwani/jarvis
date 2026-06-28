@@ -100,7 +100,7 @@ export async function runSetupWizard({
 
     await ensureOllamaServer(prompts, { output });
 
-    const modelStatus = await ensureSelectedModel(prompts, {
+    const modelStatus = await ensureModels(prompts, {
       defaultModel: env.JARVIS_OLLAMA_MODEL ?? DEFAULT_MODEL,
       output,
     });
@@ -141,6 +141,7 @@ export async function runSetupWizard({
       dataRoot,
       mode,
       model: modelStatus.model,
+      models: modelStatus.models,
       host: OLLAMA_HOST,
       system,
       prompts,
@@ -154,6 +155,7 @@ export async function runSetupWizard({
       ['Selected drive', system.isWindows ? `${dataRoot.slice(0, 3)}` : 'Home'],
       ['Ollama version', ollamaVersion],
       ['Selected model', modelStatus.model],
+      ['Model routing', formatModelRouting(modelStatus.models)],
       ['Model status', modelStatus.pulled ? 'Downloaded' : 'Ready'],
       ['Runtime mode', mode],
       ...(publicOllamaUrl ? [['Published URL', publicOllamaUrl]] : []),
@@ -558,7 +560,7 @@ async function ensureOllamaServer(prompts, { output }) {
   output.write(statusLine('success', 'Ollama server', 'Online'));
 }
 
-async function ensureSelectedModel(prompts, { defaultModel, output }) {
+async function ensureModels(prompts, { defaultModel, output }) {
   output.write(section('MODEL CORE'));
 
   // Detect this machine's RAM + GPU and pick the matching model tier.
@@ -569,7 +571,38 @@ async function ensureSelectedModel(prompts, { defaultModel, output }) {
 
   output.write(statusLine('info', 'Detected hardware', `${totalGb} GB RAM · ${gpu.available ? gpu.name : 'CPU only'} · ${recommendation.size} tier`));
 
-  // Build the model choices from the tier so each machine sees models that fit.
+  // Multi-model (recommended): install all three and route per task for speed. Single:
+  // one model handles everything — lighter on disk/RAM but slower since it does every job.
+  const strategy = await prompts.select('How should JARVIS run local models?', [
+    {
+      title: 'Multi-model  Recommended · fastest',
+      description: `Install all 3 and route per task: reasoning → ${main}, coding → ${coding}, quick → ${fast}. Uses more disk/RAM.`,
+      value: 'multi',
+    },
+    {
+      title: 'Single model',
+      description: 'Install one model that handles every task. Lighter on disk/RAM, but slower — one model does reasoning, coding, and quick replies.',
+      value: 'single',
+    },
+  ], { initial: 0 });
+
+  if (strategy === 'multi') {
+    // Deduplicate (some tiers reuse a model across roles) but keep the role map.
+    const roles = { main, coding, fast };
+    const unique = [...new Set([main, coding, fast].filter(Boolean))];
+    let pulledAny = false;
+
+    output.write(statusLine('info', 'Multi-model routing', unique.join(', ')));
+
+    for (const model of unique) {
+      const pulled = await ensureModelInstalled(prompts, model, { output });
+      pulledAny = pulledAny || pulled;
+    }
+
+    return { model: main, models: roles, pulled: pulledAny };
+  }
+
+  // Single-model: pick one and route every role to it.
   const options = [];
   const seen = new Set();
   const add = (value, title, description) => {
@@ -585,46 +618,56 @@ async function ensureSelectedModel(prompts, { defaultModel, output }) {
   add(defaultModel, `${defaultModel}  Environment default`, 'Use JARVIS_OLLAMA_MODEL from your environment.');
 
   const selectedModel = await prompts.select('Select local model core', options, { initial: 0 });
+  const pulled = await ensureModelInstalled(prompts, selectedModel, { output });
 
-  const list = await withSpinner('Scanning installed model cores', () => getOllamaModels(), { output });
+  return {
+    model: selectedModel,
+    // Route every role to the single installed model so multi-model routing is safe.
+    models: { main: selectedModel, coding: selectedModel, fast: selectedModel },
+    pulled,
+  };
+}
+
+// Ensure one model is present, pulling it (with real streamed progress) if missing.
+// Returns true when a download happened.
+async function ensureModelInstalled(prompts, model, { output }) {
+  const list = await withSpinner(`Checking ${model}`, () => getOllamaModels(), { output });
 
   if (!list.ok) {
     throw new Error(`Could not inspect Ollama models: ${list.output}`);
   }
 
-  if (hasModel(list.models, selectedModel)) {
-    output.write(statusLine('success', 'Model core detected', selectedModel));
-    return { model: selectedModel, pulled: false };
+  if (hasModel(list.models, model)) {
+    output.write(statusLine('success', 'Model core detected', model));
+    return false;
   }
 
-  output.write(statusLine('warning', 'Model core missing', selectedModel));
-  const shouldPull = await prompts.confirm(`Model ${selectedModel} not found. Download now?`, {
+  output.write(statusLine('warning', 'Model core missing', model));
+  const shouldPull = await prompts.confirm(`Model ${model} not found. Download now?`, {
     defaultValue: true,
     hint: 'Model downloads can be large and may take several minutes.',
   });
 
   if (!shouldPull) {
-    throw new Error(`Setup stopped. Pull "${selectedModel}" later with: ollama pull ${selectedModel}`);
+    throw new Error(`Setup stopped. Pull "${model}" later with: ollama pull ${model}`);
   }
 
-  // Stream Ollama's REAL download progress (percent, size, speed) by inheriting stdio.
-  // The previous fake timed progress bar filled to ~100% in a couple of seconds and then
-  // sat there for minutes while the multi-GB pull continued silently, which looked like
-  // an infinite freeze at 100%.
-  output.write(statusLine('info', 'Downloading model core', `${selectedModel} — this can take several minutes`));
+  // Stream Ollama's REAL download progress (percent, size, speed) by inheriting stdio,
+  // instead of a fake timed bar that looked frozen at 100% during a multi-GB pull.
+  output.write(statusLine('info', 'Downloading model core', `${model} — this can take several minutes`));
   output.write(`${theme.muted('Live progress from Ollama is shown below; the wizard continues when it finishes.')}\n`);
 
-  const result = await pullModel(selectedModel, { stdio: 'inherit' });
+  const result = await pullModel(model, { stdio: 'inherit' });
 
   if (!result.ok) {
-    throw new Error(`Failed to pull model "${selectedModel}". Run "ollama pull ${selectedModel}" to see the full error.`);
+    throw new Error(`Failed to pull model "${model}". Run "ollama pull ${model}" to see the full error.`);
   }
 
-  output.write(statusLine('success', 'Model core downloaded', selectedModel));
-  return { model: selectedModel, pulled: true };
+  output.write(statusLine('success', 'Model core downloaded', model));
+  return true;
 }
 
-async function saveConfig({ dataRoot, mode, model, host, system, prompts, output, signalingServerUrl }) {
+async function saveConfig({ dataRoot, mode, model, models, host, system, prompts, output, signalingServerUrl }) {
   const configPath = join(dataRoot, 'config.json');
   await mkdir(dirname(configPath), { recursive: true });
 
@@ -644,6 +687,7 @@ async function saveConfig({ dataRoot, mode, model, host, system, prompts, output
     dataRoot,
     mode,
     model,
+    models,
     host,
     system,
     signalingServerUrl,
@@ -690,6 +734,22 @@ function detectWindowsDrives() {
   }
 
   return drives;
+}
+
+// Summarize the per-role routing for the status card. "single" when all roles share one
+// model, otherwise the per-task mapping.
+function formatModelRouting(models) {
+  if (!models) {
+    return 'single model';
+  }
+
+  const { main, coding, fast } = models;
+
+  if (main === coding && coding === fast) {
+    return `single model (${main})`;
+  }
+
+  return `reasoning ${main} · coding ${coding} · fast ${fast}`;
 }
 
 function createSilentOutput() {

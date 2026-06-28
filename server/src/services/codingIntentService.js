@@ -42,8 +42,9 @@ export class CodingIntentService {
           }),
         },
       ], {
-        // Routing runs before every answer, so it must be fast: never reason, emit only
-        // the tiny JSON verdict, and never auto-continue. Otherwise it doubles latency.
+        // Routing runs before every answer, so it must be fast: use the lightweight "fast"
+        // model, never reason, emit only the tiny JSON verdict, and never auto-continue.
+        role: 'fast',
         think: false,
         maxContinuations: 0,
         generationOptions: { num_predict: 64 },

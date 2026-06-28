@@ -15,13 +15,21 @@ export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
   const tuning = recommendation.tuning;
   // Load the model saved by the setup wizard when available.
   const savedConfig = loadSavedModelConfig({ env });
+  // The active default model: setup selection, env override, then recommendation.
+  const model = savedConfig?.model ?? env.JARVIS_OLLAMA_MODEL ?? recommendation.model;
+  // Per-role models for multi-model routing. Only trust saved roles (the user installed
+  // them). Without them, route every role to the single installed model so we never call
+  // a model that isn't present.
+  const models = resolveModelRoles(savedConfig?.models, model);
 
   // Return host, model, and generation options.
   return {
     // Use env override, saved host, or default local Ollama host.
     host: env.JARVIS_OLLAMA_HOST ?? savedConfig?.host ?? 'http://127.0.0.1:11434',
     // Prefer the setup-selected model, then env override, then recommendation.
-    model: savedConfig?.model ?? env.JARVIS_OLLAMA_MODEL ?? recommendation.model,
+    model,
+    // Expose the per-role model map for routing (main/coding/fast).
+    models,
     // Store Ollama generation options.
     options: {
       // Use env override or recommended context size.
@@ -57,6 +65,19 @@ export function createModelConfig({ totalMemoryGb, env = process.env } = {}) {
 // Parse common falsey environment values.
 function isDisabled(value) {
   return /^(0|false|no|off)$/i.test(String(value ?? '').trim());
+}
+
+// Build the { main, coding, fast } role map. Each missing role falls back to the single
+// default model, so single-model setups route every role safely to the one installed model.
+export function resolveModelRoles(savedModels, defaultModel) {
+  const roles = savedModels && typeof savedModels === 'object' ? savedModels : {};
+  const main = roles.main || defaultModel;
+
+  return {
+    main,
+    coding: roles.coding || main,
+    fast: roles.fast || main,
+  };
 }
 
 // Load the setup-selected model from disk.
@@ -112,6 +133,8 @@ function readConfigCandidate(candidate) {
       priority: candidate.priority,
       config: {
         model: parsed.model,
+        // Per-role models for multi-model routing, when the user installed all three.
+        models: parsed.models && typeof parsed.models === 'object' ? parsed.models : undefined,
         host: typeof parsed.host === 'string' ? parsed.host : undefined,
         path: configPath,
         source: 'saved-config',

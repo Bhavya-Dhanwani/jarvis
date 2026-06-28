@@ -9,7 +9,37 @@ import { join } from 'node:path';
 // Import Node's built-in test runner.
 import test from 'node:test';
 // Import the model config builder under test.
-import { createModelConfig, loadSavedModelConfig } from '../src/services/modelConfigService.js';
+import { createModelConfig, loadSavedModelConfig, resolveModelRoles } from '../src/services/modelConfigService.js';
+
+// Verify role resolution: saved roles win; missing roles fall back to the single model.
+test('resolveModelRoles fills missing roles from the default model', () => {
+  assert.deepEqual(
+    resolveModelRoles({ main: 'm', coding: 'c', fast: 'f' }, 'd'),
+    { main: 'm', coding: 'c', fast: 'f' },
+  );
+  assert.deepEqual(
+    resolveModelRoles(undefined, 'only'),
+    { main: 'only', coding: 'only', fast: 'only' },
+  );
+  assert.deepEqual(
+    resolveModelRoles({ coding: 'c' }, 'd'),
+    { main: 'd', coding: 'c', fast: 'd' },
+  );
+});
+
+// Verify a saved multi-model config surfaces the role map on the runtime config.
+test('createModelConfig exposes saved per-role models', () => {
+  const configPath = join(mkdtempSync(join(tmpdir(), 'jarvis-models-')), 'config.json');
+  writeFileSync(configPath, JSON.stringify({
+    model: 'qwen3:8b',
+    models: { main: 'qwen3:8b', coding: 'qwen2.5-coder:7b', fast: 'qwen3:4b' },
+  }));
+
+  const config = createModelConfig({ env: { JARVIS_CONFIG_PATH: configPath } });
+
+  assert.equal(config.model, 'qwen3:8b');
+  assert.deepEqual(config.models, { main: 'qwen3:8b', coding: 'qwen2.5-coder:7b', fast: 'qwen3:4b' });
+});
 
 // Verify setup config is the runtime source of truth.
 test('model config prefers setup-selected model over environment model', () => {

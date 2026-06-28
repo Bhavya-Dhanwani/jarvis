@@ -42,18 +42,20 @@ export class OllamaService {
   }
 
   // Generate one non-streaming assistant turn that may contain native tool calls.
-  async generateToolTurn(messages, { tools = [] } = {}) {
+  async generateToolTurn(messages, { tools = [], role = 'coding' } = {}) {
     await this.#waitForBackgroundWarmUp();
 
     const options = createRequestOptions(this.config.options, messages);
     const requestMessages = createRequestMessages(messages);
+    // Tool turns drive the coding workflow, so default to the coding model.
+    const model = this.#resolveModel({ role, content: latestUserContent(messages) });
 
     // Implementation tool turns should not burn time reasoning. Thinking-capable models
     // reason by default, so disable it explicitly (think:false); omit the field only when
     // the model rejects it, mirroring the chat path's fallback.
     const send = (think) => sendChatRequestWithEmptyRetry({
       host: this.config.host,
-      model: this.config.model,
+      model,
       keepAlive: this.config.keepAlive,
       messages: requestMessages,
       options,
@@ -97,11 +99,32 @@ export class OllamaService {
   }
 
   async #loadModel() {
+    // Preload every distinct role model so multi-model routing never pays a cold load on
+    // first use. Single-model setups warm just the one model. The first failure surfaces.
+    const models = this.#installedModels();
+    let lastError = null;
+
+    for (const model of models) {
+      try {
+        await this.#loadOneModel(model);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    // Only fail the warm-up if NO model could be loaded; a partial multi-model warm still
+    // lets routing fall back to whatever did load.
+    if (lastError && models.length === 1) {
+      throw lastError;
+    }
+  }
+
+  async #loadOneModel(model) {
     const response = await fetch(`${this.config.host}/api/generate`, {
       method: 'POST',
       headers: createOllamaFetchHeaders(this.config.host),
       body: JSON.stringify({
-        model: this.config.model,
+        model,
         prompt: '',
         stream: true,
         keep_alive: this.config.warmKeepAlive ?? '30s',
@@ -132,7 +155,7 @@ export class OllamaService {
   }
 
   // Generate an assistant reply from chat history.
-  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null, think = null } = {}) {
+  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null, think = null, role = null } = {}) {
     const localReply = createLocalFastReply(messages);
 
     if (localReply) {
@@ -151,6 +174,9 @@ export class OllamaService {
     };
     let requestMessages = createRequestMessages(messages);
     let reply = '';
+    // Pick the model: an explicit role (intent='fast', coding='coding') wins; otherwise
+    // chat auto-routes simple prompts to the fast model and complex ones to main.
+    const model = this.#resolveModel({ role, content: latestUserContent(messages) });
     const continuationLimit = Number(maxContinuations
       ?? this.config.maxAutoContinuations
       ?? DEFAULT_MAX_AUTO_CONTINUATIONS);
@@ -174,7 +200,7 @@ export class OllamaService {
       try {
         result = await sendChatRequestWithEmptyRetry({
           host: this.config.host,
-          model: this.config.model,
+          model,
           keepAlive: this.config.keepAlive,
           messages: requestMessages,
           options,
@@ -232,6 +258,28 @@ export class OllamaService {
   // Whether to ask Ollama to stream the model's reasoning for this turn. An explicit
   // override wins; otherwise reasoning is on only when enabled in config AND the prompt
   // is complex enough to benefit. Auto-disabled if the model has no thinking mode.
+  // Resolve which model to run for this turn. An explicit role (coding/fast/main) wins;
+  // otherwise chat auto-routes: simple/short prompts use the fast model, complex ones use
+  // main. Single-model setups map every role to the one installed model, so this is safe.
+  #resolveModel({ role = null, content = '' } = {}) {
+    const models = this.config.models ?? {};
+    const fallback = this.config.model;
+
+    if (role) {
+      return models[role] ?? fallback;
+    }
+
+    const autoRole = isComplexPrompt(content) ? 'main' : 'fast';
+    return models[autoRole] ?? models.main ?? fallback;
+  }
+
+  // Distinct model names this service may run, so warm-up can preload all of them.
+  #installedModels() {
+    const models = this.config.models ?? {};
+    const names = [this.config.model, models.main, models.coding, models.fast].filter(Boolean);
+    return [...new Set(names)];
+  }
+
   #shouldThink(override, content) {
     if (this.thinkDisabled === true) {
       return false;

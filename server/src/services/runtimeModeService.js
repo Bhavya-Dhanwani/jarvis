@@ -57,6 +57,7 @@ export async function saveJarvisConfig({
   dataRoot = DEFAULT_DATA_ROOT,
   mode,
   model,
+  models,
   host,
   system,
   signalingServerUrl,
@@ -69,6 +70,9 @@ export async function saveJarvisConfig({
     name: 'JARVIS',
     mode,
     model: model ?? previous.model,
+    // Per-role models for multi-model routing ({ main, coding, fast }). Optional; when
+    // absent the runtime routes everything to `model`.
+    models: models ?? previous.models,
     host: host ?? previous.host,
     dataRoot,
     signalingServerUrl: signalingServerUrl ?? previous.signalingServerUrl,

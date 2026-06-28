@@ -141,6 +141,38 @@ test('generateReply strips inline think tags streamed by an out-of-date host', a
   service.close();
 });
 
+test('generateReply forwards the model role to the host', async () => {
+  const { service, sockets } = makeService();
+  const replyPromise = service.generateReply([{ role: 'user', content: 'classify this request please' }], {
+    onToken: () => {},
+    role: 'fast',
+  });
+
+  const socket = await waitForSend(sockets);
+  const call = socket.sent[0];
+
+  assert.equal(call.args.role, 'fast');
+
+  socket.receive({ type: 'result', id: call.id, value: 'ok' });
+  await replyPromise;
+  service.close();
+});
+
+test('generateToolTurn forwards the coding role by default', async () => {
+  const { service, sockets } = makeService();
+  const turnPromise = service.generateToolTurn([{ role: 'user', content: 'edit a file' }], { tools: [] });
+
+  const socket = await waitForSend(sockets);
+  const call = socket.sent[0];
+
+  assert.equal(call.method, 'generateToolTurn');
+  assert.equal(call.args.role, 'coding');
+
+  socket.receive({ type: 'result', id: call.id, value: { role: 'assistant', content: 'done' } });
+  await turnPromise;
+  service.close();
+});
+
 test('generateToolTurn resolves with the host message', async () => {
   const { service, sockets } = makeService();
   const message = { role: 'assistant', content: '', tool_calls: [{ name: 'write' }] };

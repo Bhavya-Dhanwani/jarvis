@@ -41,6 +41,8 @@ export async function handleRelayCall({ frame, ollamaService, send, log = null }
         maxContinuations: args.maxContinuations ?? null,
         // Honor the client's reasoning decision (the cheap intent router sends think:false).
         think: args.think ?? null,
+        // Honor the client's model role so the host runs the right model (fast/coding/main).
+        role: args.role ?? null,
       });
 
       send({ type: 'result', id, value: reply });
@@ -57,6 +59,7 @@ export async function handleRelayCall({ frame, ollamaService, send, log = null }
     if (method === 'generateToolTurn') {
       const message = await ollamaService.generateToolTurn(args.messages ?? [], {
         tools: args.tools ?? [],
+        role: args.role ?? 'coding',
       });
 
       send({ type: 'result', id, value: message });

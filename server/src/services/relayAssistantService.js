@@ -43,7 +43,7 @@ export class RelayAssistantService {
     await this.#call('warmUp', {});
   }
 
-  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null, think = null } = {}) {
+  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null, think = null, role = null } = {}) {
     // Answer casual small talk locally so greetings never cross the relay (instant, and
     // immune to a slow or out-of-date host).
     const localReply = createLocalFastReply(messages);
@@ -78,6 +78,7 @@ export class RelayAssistantService {
       generationOptions,
       maxContinuations,
       think,
+      role,
     }, {
       onToken: (chunk) => router.push(chunk),
       onThinking,
@@ -88,8 +89,8 @@ export class RelayAssistantService {
     return stripThinkTags(typeof reply === 'string' ? reply : '');
   }
 
-  async generateToolTurn(messages, { tools = [] } = {}) {
-    return this.#call('generateToolTurn', { messages, tools });
+  async generateToolTurn(messages, { tools = [], role = 'coding' } = {}) {
+    return this.#call('generateToolTurn', { messages, tools, role });
   }
 
   // Resolve once a host is connected to the relay, or reject after timeoutMs.
