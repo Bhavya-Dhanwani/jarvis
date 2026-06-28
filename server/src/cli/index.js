@@ -23,6 +23,7 @@ import {
   publishOllamaUrl,
   refreshAccessToken,
 } from '../services/authClientService.js';
+import WebSocket from 'ws';
 import { startBestTunnel } from '../services/tunnelService.js';
 import { createHostSocketServer, composeHostSocketUrl } from '../services/hostSocketServer.js';
 import { RelayAssistantService } from '../services/relayAssistantService.js';
@@ -448,7 +449,7 @@ async function runHostRelay({ context, env, auth, hostModelConfig, refresh, outp
     localUrl: socketServer.localUrl(),
     output: context.outputStream ?? process.stdout,
     dataRoot: config?.dataRoot,
-    verify: context.verifyPublishedTunnel === false ? undefined : verifyHostSocketTunnel,
+    verify: context.verifyPublishedTunnel === false ? undefined : (probeUrl) => verifyHostSocketTunnel(probeUrl, key),
   });
 
   const socketUrl = composeHostSocketUrl(tunnel.url, key);
@@ -500,22 +501,51 @@ async function runHostRelay({ context, env, auth, hostModelConfig, refresh, outp
   return result;
 }
 
-// Confirm a published tunnel actually routes back to this host's socket server. The
-// server answers plain HTTP probes with "jarvis-host", so a tunnel pointing elsewhere
-// (or a provider whose edge is blocked) is rejected before we publish it.
-async function verifyHostSocketTunnel(url) {
+// Confirm a published tunnel can actually carry the WebSocket the client needs. An HTTP
+// probe alone is not enough: some tunnels pass plain GETs but drop WebSocket upgrades, so
+// the host would publish a URL that times out on the client. This opens a real WS to the
+// host's own socket through the public URL and only accepts the tunnel if it connects.
+async function verifyHostSocketTunnel(url, key) {
+  // First a cheap HTTP probe: confirm the tunnel routes back to THIS host at all.
   try {
     const response = await fetch(url, { method: 'GET' });
 
-    if (!response.ok) {
+    if (!response.ok || !(await response.text()).includes('jarvis-host')) {
       return false;
     }
-
-    const body = await response.text();
-    return body.includes('jarvis-host');
   } catch {
     return false;
   }
+
+  // Then the decisive check: a real WebSocket handshake end-to-end through the tunnel.
+  const socketUrl = composeHostSocketUrl(url, key);
+
+  return new Promise((resolve) => {
+    let done = false;
+    const socket = new WebSocket(socketUrl, {
+      handshakeTimeout: 8000,
+      headers: { 'x-jarvis-device': 'host-self-check', 'bypass-tunnel-reminder': 'true', 'User-Agent': 'jarvis-client' },
+    });
+
+    const finish = (ok) => {
+      if (done) {
+        return;
+      }
+
+      done = true;
+      clearTimeout(timer);
+      try {
+        (socket.terminate ?? socket.close)?.call(socket);
+      } catch {
+        // Ignore teardown errors.
+      }
+      resolve(ok);
+    };
+
+    const timer = setTimeout(() => finish(false), 9000);
+    socket.on('open', () => finish(true));
+    socket.on('error', () => finish(false));
+  });
 }
 
 async function resolveLocalOllamaTunnelTarget(host, context = {}) {

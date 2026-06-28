@@ -29,6 +29,8 @@ export function composeHostSocketUrl(tunnelUrl, key) {
 
 // Create (but do not start) the host socket server. `key` gates every connection; a
 // fresh random one is generated when not supplied. `ollamaService` runs the model.
+// `output(level, title, detail)` logs to the host console so the operator sees, in real
+// time, which device connected, each prompt received, and when streaming starts.
 export function createHostSocketServer({
   ollamaService,
   key = randomBytes(16).toString('hex'),
@@ -47,10 +49,15 @@ export function createHostSocketServer({
     res.end('jarvis-host');
   });
 
-  const wss = new WebSocketServerImpl({ server: httpServer, path: HOST_SOCKET_PATH });
+  // No path restriction: some tunnels rewrite or drop the path on WebSocket upgrades, so
+  // accept the upgrade on any path and authorize purely with the ?key= capability.
+  const wss = new WebSocketServerImpl({ server: httpServer });
 
   wss.on('connection', (socket, request) => {
+    const device = describeDevice(request);
+
     if (!isAuthorized(request, key)) {
+      output('warning', 'Rejected connection', `${device} (invalid or missing key)`);
       try {
         socket.close(4401, 'Invalid or missing key');
       } catch {
@@ -58,6 +65,8 @@ export function createHostSocketServer({
       }
       return;
     }
+
+    output('success', 'Device connected', device);
 
     // Flush each token frame immediately instead of letting Nagle batch them.
     socket._socket?.setNoDelay?.(true);
@@ -71,10 +80,53 @@ export function createHostSocketServer({
     socket.on('message', (raw) => {
       const frame = parseJson(raw);
 
-      if (frame?.type === 'call') {
-        // Each call streams its own token/result frames back on this same socket.
-        handleRelayCall({ frame, ollamaService, send });
+      if (frame?.type !== 'call') {
+        return;
       }
+
+      // Log the incoming request: the actual prompt for generation, the method otherwise.
+      if (frame.method === 'generateReply' || frame.method === 'generateToolTurn') {
+        const prompt = latestPrompt(frame.args?.messages);
+        const roleTag = frame.args?.role ? ` [${frame.args.role}]` : '';
+        output('info', 'Prompt received', `${device}${roleTag} → ${truncate(prompt, 100)}`);
+      } else {
+        output('info', 'Request received', `${device} → ${frame.method}`);
+      }
+
+      // Wrap send so we can log the moment streaming starts and when it finishes.
+      let streamingLogged = false;
+      const loggingSend = (value) => {
+        if (!streamingLogged && (value.type === 'token' || value.type === 'thinking')) {
+          streamingLogged = true;
+          output('info', 'Streaming response', `${device} → ${value.type === 'thinking' ? 'reasoning…' : 'answering…'}`);
+        }
+
+        if (value.type === 'result') {
+          output('success', 'Response sent', device);
+        }
+
+        if (value.type === 'error') {
+          output('warning', 'Request failed', `${device} → ${value.message ?? 'error'}`);
+        }
+
+        send(value);
+      };
+
+      // Each call streams its own token/result frames back on this same socket.
+      handleRelayCall({
+        frame,
+        ollamaService,
+        send: loggingSend,
+        log: (detail) => output('info', 'Timing', `${device} → ${detail}`),
+      });
+    });
+
+    socket.on('close', () => {
+      output('warning', 'Device disconnected', device);
+    });
+
+    socket.on('error', () => {
+      // 'close' handles cleanup/logging.
     });
   });
 
@@ -126,6 +178,39 @@ function isAuthorized(request, key) {
   } catch {
     return false;
   }
+}
+
+// A human-friendly label for a connecting client: the device name it announced, plus its
+// remote address. The client sends os.hostname() in the x-jarvis-device header.
+function describeDevice(request) {
+  const name = request?.headers?.['x-jarvis-device'];
+  const address = request?.socket?.remoteAddress;
+  const parts = [];
+
+  if (name) {
+    parts.push(String(name));
+  }
+
+  if (address) {
+    parts.push(String(address));
+  }
+
+  return parts.length ? parts.join(' · ') : 'unknown device';
+}
+
+// Pull the latest user prompt text out of a messages array for logging.
+function latestPrompt(messages) {
+  if (!Array.isArray(messages)) {
+    return '(no prompt)';
+  }
+
+  const latest = [...messages].reverse().find((message) => message?.role === 'user');
+  return String(latest?.content ?? '(no prompt)').replace(/\s+/g, ' ').trim() || '(empty prompt)';
+}
+
+function truncate(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 function parseJson(raw) {

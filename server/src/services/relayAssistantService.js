@@ -3,6 +3,7 @@
 // codingAgentService expect (warmUp, generateReply, generateToolTurn), but every
 // call travels over one WebSocket to the signaling server, which forwards it to the
 // host. Tokens stream back in real-time through onToken.
+import { hostname } from 'node:os';
 import WebSocket from 'ws';
 import { toRelayUrl } from './relayUrl.js';
 import { createLocalFastReply, createThinkTagRouter, stripThinkTags } from './ollamaService.js';
@@ -11,26 +12,35 @@ import { logFlow } from './flowLogger.js';
 // Bound each WebSocket handshake so a stuck tunnel upgrade can't hang the client.
 const CONNECT_TIMEOUT_MS = 8000;
 
-// Options for the `ws` client: a handshake timeout plus headers that get past tunnel
-// interstitials (localtunnel's reminder page blocks plain upgrades without these). The
-// injected fake sockets in tests simply ignore the second argument.
+// This machine's name, announced to the host so it can log which device connected.
+function deviceName() {
+  try {
+    return hostname() || 'jarvis-client';
+  } catch {
+    return 'jarvis-client';
+  }
+}
+
+// Options for the `ws` client: a handshake timeout, a device header the host logs, plus
+// headers that get past tunnel interstitials (localtunnel's reminder page blocks plain
+// upgrades without these). Injected fake sockets in tests simply ignore the second arg.
 function socketConnectOptions(url) {
-  const options = { handshakeTimeout: CONNECT_TIMEOUT_MS };
+  const headers = {
+    'x-jarvis-device': deviceName(),
+    'User-Agent': 'jarvis-client',
+  };
 
   try {
-    const { hostname } = new URL(url);
+    const { hostname: host } = new URL(url);
 
-    if (hostname.endsWith('.loca.lt') || hostname.endsWith('.trycloudflare.com') || hostname.endsWith('.ngrok-free.app')) {
-      options.headers = {
-        'bypass-tunnel-reminder': 'true',
-        'User-Agent': 'jarvis-client',
-      };
+    if (host.endsWith('.loca.lt') || host.endsWith('.trycloudflare.com') || host.endsWith('.ngrok-free.app')) {
+      headers['bypass-tunnel-reminder'] = 'true';
     }
   } catch {
-    // Non-URL (tests): no extra headers needed.
+    // Non-URL (tests): the device header is still fine to send.
   }
 
-  return options;
+  return { handshakeTimeout: CONNECT_TIMEOUT_MS, headers };
 }
 
 export class RelayAssistantService {
