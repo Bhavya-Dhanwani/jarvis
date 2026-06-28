@@ -1,7 +1,10 @@
-// Transport-agnostic dispatcher for one model "call" frame. Used by the host's own
-// WebSocket server (hostSocketServer.js): it runs the local OllamaService and emits
-// token/thinking/result/error frames through `send`. Kept separate from any socket
-// lifecycle so it is trivially testable with a mock OllamaService and a capturing `send`.
+import WebSocket from 'ws';
+import { toRelayUrl } from './relayUrl.js';
+
+// Transport-agnostic dispatcher for one model "call" frame. Used by both the host's own
+// WebSocket server (hostSocketServer.js) and the relay agent below: it runs the local
+// OllamaService and emits token/thinking/result/error frames through `send`. Kept separate
+// from any socket lifecycle so it is trivially testable with a mock OllamaService.
 export async function handleRelayCall({ frame, ollamaService, send, log = null }) {
   const { id, method, args = {} } = frame ?? {};
 
@@ -69,5 +72,186 @@ export async function handleRelayCall({ frame, ollamaService, send, log = null }
     send({ type: 'error', id, message: `Unknown relay method: ${method}` });
   } catch (error) {
     send({ type: 'error', id, message: error?.message ?? 'Relay call failed on the host' });
+  }
+}
+
+// Long-lived host relay agent: holds a WebSocket open to the signaling server as the active
+// host, runs the local OllamaService, and streams generated frames back to whichever client
+// issued each call. Both host and client connect OUT to the server, so no inbound tunnel is
+// needed. start() resolves only when stop() is called (e.g. Ctrl+C).
+export function createHostRelayAgent({
+  signalingServerUrl,
+  getAccessToken,
+  ollamaService,
+  output = () => {},
+  WebSocketImpl = WebSocket,
+  reconnectDelayMs = 3000,
+  warm = null,
+  warmIntervalMs = 600000,
+}) {
+  let socket = null;
+  let stopped = false;
+  let reconnectTimer = null;
+  let warmTimer = null;
+  let resolveStopped = null;
+
+  const send = (value) => {
+    if (socket && socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify(value));
+    }
+  };
+
+  // Log the prompt and stream lifecycle for each call so the operator sees activity live.
+  const dispatch = (frame) => {
+    if (frame?.type !== 'call') {
+      return;
+    }
+
+    const device = String(frame.args?.device ?? 'a client');
+
+    if (frame.method === 'generateReply' || frame.method === 'generateToolTurn') {
+      const roleTag = frame.args?.role ? ` [${frame.args.role}]` : '';
+      output('info', 'Prompt received', `${device}${roleTag} → ${truncate(latestPrompt(frame.args?.messages), 100)}`);
+    } else {
+      output('info', 'Request received', `${device} → ${frame.method}`);
+    }
+
+    let streamingLogged = false;
+    const loggingSend = (value) => {
+      if (!streamingLogged && (value.type === 'token' || value.type === 'thinking')) {
+        streamingLogged = true;
+        output('info', 'Streaming response', `${device} → ${value.type === 'thinking' ? 'reasoning…' : 'answering…'}`);
+      }
+
+      if (value.type === 'result') {
+        output('success', 'Response sent', device);
+      }
+
+      send(value);
+    };
+
+    handleRelayCall({ frame, ollamaService, send: loggingSend });
+  };
+
+  async function connect() {
+    if (stopped) {
+      return;
+    }
+
+    let token;
+
+    try {
+      token = await getAccessToken();
+    } catch (error) {
+      output('warning', 'Relay auth failed', error.message ?? 'could not refresh token');
+      scheduleReconnect();
+      return;
+    }
+
+    const url = toRelayUrl(signalingServerUrl, { role: 'host', token });
+    socket = new WebSocketImpl(url);
+
+    socket.on('open', () => {
+      socket._socket?.setNoDelay?.(true);
+      output('success', 'Relay online', 'host connected; clients can reach this machine');
+    });
+
+    socket.on('message', (raw) => {
+      const frame = parseJson(raw);
+      if (frame) {
+        dispatch(frame);
+      }
+    });
+
+    socket.on('close', () => {
+      if (!stopped) {
+        output('warning', 'Relay dropped', 'reconnecting…');
+        scheduleReconnect();
+      }
+    });
+
+    socket.on('error', () => {
+      // 'close' fires after 'error'; reconnect is handled there.
+    });
+  }
+
+  function scheduleReconnect() {
+    if (stopped) {
+      return;
+    }
+
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, reconnectDelayMs);
+  }
+
+  function startWarmLoop() {
+    if (typeof warm !== 'function') {
+      return;
+    }
+
+    const tick = async () => {
+      if (stopped) {
+        return;
+      }
+
+      await warm();
+      warmTimer = setTimeout(tick, warmIntervalMs);
+    };
+
+    warmTimer = setTimeout(tick, warmIntervalMs);
+  }
+
+  function stop() {
+    if (stopped) {
+      return;
+    }
+
+    stopped = true;
+    clearTimeout(reconnectTimer);
+    clearTimeout(warmTimer);
+
+    try {
+      socket?.close?.();
+    } catch {
+      // Ignore errors closing a broken socket.
+    }
+
+    output('warning', 'Relay stopped', 'host link closed');
+    resolveStopped?.();
+  }
+
+  function start() {
+    startWarmLoop();
+    connect();
+
+    return new Promise((resolve) => {
+      resolveStopped = resolve;
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+    });
+  }
+
+  return { start, stop };
+}
+
+function latestPrompt(messages) {
+  if (!Array.isArray(messages)) {
+    return '(no prompt)';
+  }
+
+  const latest = [...messages].reverse().find((message) => message?.role === 'user');
+  return String(latest?.content ?? '(no prompt)').replace(/\s+/g, ' ').trim() || '(empty prompt)';
+}
+
+function truncate(value, max) {
+  const text = String(value ?? '');
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function parseJson(raw) {
+  try {
+    return JSON.parse(raw.toString());
+  } catch {
+    return null;
   }
 }

@@ -26,6 +26,7 @@ import {
 import WebSocket from 'ws';
 import { startBestTunnel } from '../services/tunnelService.js';
 import { createHostSocketServer, composeHostSocketUrl } from '../services/hostSocketServer.js';
+import { createHostRelayAgent } from '../services/hostRelayAgent.js';
 import { RelayAssistantService } from '../services/relayAssistantService.js';
 import {
   RUNTIME_MODES,
@@ -330,7 +331,12 @@ async function handleHostPublisherRuntime(context = {}) {
   // Relay mode (default): keep a WebSocket open to the signaling server instead of
   // exposing a public tunnel. The model runs locally and streams over the socket.
   if (isRelayEnabled(context, env)) {
-    return runHostRelay({ context, env, auth, hostModelConfig, refresh, output });
+    // Default: route through the signaling server's relay (both sides connect out, no
+    // tunnel needed — reliable on networks where tunnels drop WebSockets). Opt into the
+    // direct host socket + tunnel with JARVIS_DIRECT_SOCKET=1.
+    return isDirectSocketEnabled(context, env)
+      ? runHostDirectSocket({ context, env, auth, hostModelConfig, refresh, output })
+      : runHostRelay({ context, env, auth, hostModelConfig, refresh, output });
   }
 
   const publish = context.publishOllamaUrl ?? publishOllamaUrl;
@@ -421,11 +427,61 @@ function isRelayEnabled(context = {}, env = process.env) {
   return !/^(0|false|no|off)$/i.test(String(env.JARVIS_RELAY ?? '').trim());
 }
 
+// Opt in to the direct host socket + tunnel transport.
+function isDirectSocketEnabled(context = {}, env = process.env) {
+  if (typeof context.directSocketEnabled === 'boolean') {
+    return context.directSocketEnabled;
+  }
+
+  return /^(1|true|yes|on)$/i.test(String(env.JARVIS_DIRECT_SOCKET ?? '').trim());
+}
+
+// Run host mode over the signaling-server relay (default). The host connects OUT to the
+// relay and answers client call frames; no inbound tunnel is needed, so this works on
+// networks where tunnels drop WebSocket upgrades. Holds open until the user stops it.
+async function runHostRelay({ context, env, auth, hostModelConfig, refresh, output }) {
+  const warm = context.warmLocalModel ?? warmLocalModel;
+  const ollamaService = context.hostAssistantService ?? new OllamaService(hostModelConfig);
+  const getAccessToken = () => refresh({ serverUrl: auth.serverUrl, refreshToken: auth.refreshToken });
+
+  const agent = (context.createHostRelayAgent ?? createHostRelayAgent)({
+    signalingServerUrl: auth.serverUrl,
+    getAccessToken,
+    ollamaService,
+    warm: () => warm(hostModelConfig),
+    warmIntervalMs: context.hostWarmIntervalMs ?? 600000,
+    output: (level, title, detail) => output(statusLine(level, title, detail)),
+  });
+
+  output(successBox('Host mode is online over the relay. Clients can now reach this machine.'));
+  output(card('HOST LINK', [
+    ['Server', auth.serverUrl],
+    ['Transport', 'relay (websocket, no tunnel)'],
+    ['Model', hostModelConfig.model],
+  ], { borderColor: 'green' }));
+
+  // Warm the model in the background so the host registers with the relay immediately.
+  warm(hostModelConfig)
+    .then((ok) => output(ok
+      ? statusLine('success', 'Model warm', `${hostModelConfig.model} loaded and kept resident`)
+      : statusLine('warning', 'Model warm-up skipped', 'first request loads the model on demand')))
+    .catch(() => {});
+
+  const result = { status: 'ok', command: 'host', mode: RUNTIME_MODES.HOST, transport: 'relay' };
+  const started = agent.start();
+
+  if (shouldKeepHostOnline(context)) {
+    await started;
+  }
+
+  return result;
+}
+
 // Run host mode with a DIRECT socket: the host runs its own WebSocket server, exposes it
 // through a tunnel, and publishes that socket URL to the signaling server (auth + link
-// exchange only). Clients then connect straight to this machine — the signaling server is
-// not in the data path. Holds open until the user stops it (Ctrl+C).
-async function runHostRelay({ context, env, auth, hostModelConfig, refresh, output }) {
+// exchange only). Clients then connect straight to this machine. Opt in with
+// JARVIS_DIRECT_SOCKET=1. Holds open until the user stops it (Ctrl+C).
+async function runHostDirectSocket({ context, env, auth, hostModelConfig, refresh, output }) {
   const config = loadJarvisConfig({ env });
   const warm = context.warmLocalModel ?? warmLocalModel;
   const ollamaService = context.hostAssistantService ?? new OllamaService(hostModelConfig);
@@ -888,6 +944,39 @@ async function setupClientRelayIfEnabled({ context, output }) {
 
   const refresh = context.refreshAccessToken ?? refreshAccessToken;
   const accessToken = await refresh({ serverUrl: auth.serverUrl, refreshToken: auth.refreshToken });
+
+  // Default: client connects to the signaling-server relay (no tunnel, reliable). Opt into
+  // the direct host socket with JARVIS_DIRECT_SOCKET=1.
+  if (isDirectSocketEnabled(context, env)) {
+    await setupDirectSocketClient({ context, output, auth, refresh, accessToken });
+  } else {
+    await setupRelayClient({ context, output, auth, refresh });
+  }
+}
+
+// Set up a client that connects to the signaling-server relay (the default). Both host and
+// client connect OUT to the relay, so no inbound tunnel is needed.
+async function setupRelayClient({ context, output, auth, refresh }) {
+  output(statusLine('info', 'Relay link', 'waiting for a host to come online...'));
+
+  const relay = (context.createRelayAssistant ?? createRelayAssistant)({
+    signalingServerUrl: auth.serverUrl,
+    getAccessToken: () => refresh({ serverUrl: auth.serverUrl, refreshToken: auth.refreshToken }),
+  });
+
+  try {
+    await relay.connect();
+    output(statusLine('success', 'Connected', 'streaming from the host via relay'));
+  } catch (error) {
+    output(statusLine('warning', 'Relay connect failed', error.message ?? 'could not reach the signaling server'));
+  }
+
+  context.assistantService = relay;
+}
+
+// Set up a client that connects to the host's own socket (direct-socket mode). The client
+// claims the host's published socket URL, then connects to it (the tunnel the host opened).
+async function setupDirectSocketClient({ context, output, auth, refresh, accessToken }) {
 
   output(statusLine('info', 'Host link', 'fetching the host socket URL from the server...'));
 

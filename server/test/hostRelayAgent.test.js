@@ -3,7 +3,73 @@ import assert from 'node:assert/strict';
 // Import Node's built-in test runner.
 import test from 'node:test';
 // Import the relay call dispatcher under test.
-import { handleRelayCall } from '../src/services/hostRelayAgent.js';
+import { createHostRelayAgent, handleRelayCall } from '../src/services/hostRelayAgent.js';
+
+// Verify the host relay agent connects out, dispatches an incoming call to the model, and
+// streams token + result frames back (with prompt/streaming logging for the operator).
+test('createHostRelayAgent dispatches a relay call and logs it', async () => {
+  const sent = [];
+  const logs = [];
+  const handlers = {};
+
+  class FakeWS {
+    constructor() {
+      this.OPEN = 1;
+      this.readyState = 1;
+    }
+
+    on(event, cb) {
+      (handlers[event] ??= []).push(cb);
+      return this;
+    }
+
+    send(value) {
+      sent.push(JSON.parse(value));
+    }
+
+    close() {}
+  }
+
+  const agent = createHostRelayAgent({
+    signalingServerUrl: 'http://localhost:4000',
+    getAccessToken: async () => 'token',
+    ollamaService: {
+      async generateReply(_messages, { onToken }) {
+        onToken('hi');
+        return 'hi';
+      },
+    },
+    WebSocketImpl: FakeWS,
+    output: (level, title, detail) => logs.push({ title, detail }),
+  });
+
+  agent.start();
+
+  // Wait for connect (async getAccessToken) to register handlers, then open the socket.
+  for (let i = 0; i < 100 && !handlers.message; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  (handlers.open ?? []).forEach((cb) => cb());
+
+  handlers.message.forEach((cb) => cb(Buffer.from(JSON.stringify({
+    type: 'call',
+    id: '1',
+    method: 'generateReply',
+    args: { device: 'macbook', messages: [{ role: 'user', content: 'explain hashmaps' }] },
+  }))));
+
+  for (let i = 0; i < 100 && !sent.find((f) => f.type === 'result'); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+
+  assert.ok(sent.find((f) => f.type === 'token' && f.chunk === 'hi'));
+  assert.equal(sent.find((f) => f.type === 'result').value, 'hi');
+  const prompt = logs.find((entry) => entry.title === 'Prompt received');
+  assert.match(prompt.detail, /macbook/);
+  assert.match(prompt.detail, /explain hashmaps/);
+
+  agent.stop();
+});
 
 // A capturing send() so we can inspect the frames the host would emit.
 function createCapture() {

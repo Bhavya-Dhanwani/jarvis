@@ -182,7 +182,8 @@ export class RelayAssistantService {
         firstTokenAt: null,
         chunks: 0,
       });
-      this.#send({ type: 'call', id, method, args });
+      // Announce this device so the host can log which client sent each prompt.
+      this.#send({ type: 'call', id, method, args: { ...args, device: deviceName() } });
     });
   }
 
