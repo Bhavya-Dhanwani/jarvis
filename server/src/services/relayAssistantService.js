@@ -5,6 +5,8 @@
 // host. Tokens stream back in real-time through onToken.
 import WebSocket from 'ws';
 import { toRelayUrl } from './relayUrl.js';
+import { createLocalFastReply, createThinkTagRouter, stripThinkTags } from './ollamaService.js';
+import { logFlow } from './flowLogger.js';
 
 export class RelayAssistantService {
   #signalingServerUrl;
@@ -17,10 +19,15 @@ export class RelayAssistantService {
   #hostOnline = false;
   #hostWaiters = new Set();
 
-  constructor({ signalingServerUrl, getAccessToken, WebSocketImpl = WebSocket }) {
+  #directUrl;
+
+  constructor({ signalingServerUrl, getAccessToken, WebSocketImpl = WebSocket, directUrl = null }) {
     this.#signalingServerUrl = signalingServerUrl;
     this.#getAccessToken = getAccessToken;
     this.#WebSocketImpl = WebSocketImpl;
+    // When set, connect straight to the host's own socket (no signaling relay in the
+    // data path). The URL already carries the ?key= capability from the claim.
+    this.#directUrl = directUrl;
   }
 
   get hostOnline() {
@@ -36,14 +43,49 @@ export class RelayAssistantService {
     await this.#call('warmUp', {});
   }
 
-  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null } = {}) {
+  async generateReply(messages, { onToken = null, onThinking = null, generationOptions = {}, maxContinuations = null, think = null } = {}) {
+    // Answer casual small talk locally so greetings never cross the relay (instant, and
+    // immune to a slow or out-of-date host).
+    const localReply = createLocalFastReply(messages);
+
+    if (localReply) {
+      if (typeof onToken === 'function') {
+        onToken(localReply);
+      }
+
+      return localReply;
+    }
+
+    // Even if the host streams chain-of-thought inline as <think>...</think> tokens (an
+    // out-of-date host), route it to the dimmed thinking channel and keep it out of the
+    // answer here on the client. An up-to-date host already sends clean tokens, so this
+    // is a transparent safety net.
+    const router = createThinkTagRouter({
+      onAnswer: (text) => {
+        if (typeof onToken === 'function') {
+          onToken(text);
+        }
+      },
+      onThink: (text) => {
+        if (typeof onThinking === 'function') {
+          onThinking(text);
+        }
+      },
+    });
+
     const reply = await this.#call('generateReply', {
       messages,
       generationOptions,
       maxContinuations,
-    }, { onToken, onThinking });
+      think,
+    }, {
+      onToken: (chunk) => router.push(chunk),
+      onThinking,
+    });
 
-    return typeof reply === 'string' ? reply : '';
+    router.flush();
+
+    return stripThinkTags(typeof reply === 'string' ? reply : '');
   }
 
   async generateToolTurn(messages, { tools = [] } = {}) {
@@ -84,7 +126,19 @@ export class RelayAssistantService {
     const id = String(this.#nextId++);
 
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject, onToken, onThinking });
+      this.#pending.set(id, {
+        resolve,
+        reject,
+        onToken,
+        onThinking,
+        // Timing markers for the flow log: when sent, when the first chunk/answer
+        // arrived, and how many token chunks streamed.
+        method,
+        sentAt: Date.now(),
+        firstChunkAt: null,
+        firstTokenAt: null,
+        chunks: 0,
+      });
       this.#send({ type: 'call', id, method, args });
     });
   }
@@ -105,8 +159,10 @@ export class RelayAssistantService {
     }
 
     this.#connecting = (async () => {
-      const token = await this.#getAccessToken();
-      const url = toRelayUrl(this.#signalingServerUrl, { role: 'client', token });
+      // Direct mode: connect to the host's published socket URL (key already embedded).
+      // Legacy relay mode: derive the signaling server's /relay URL with an auth token.
+      const url = this.#directUrl
+        ?? toRelayUrl(this.#signalingServerUrl, { role: 'client', token: await this.#getAccessToken() });
       const socket = new this.#WebSocketImpl(url);
       this.#socket = socket;
 
@@ -120,6 +176,11 @@ export class RelayAssistantService {
         socket.on('open', () => {
           // Flush frames immediately so streamed tokens arrive without Nagle batching.
           socket._socket?.setNoDelay?.(true);
+          // In direct mode the connected host IS the host — there is no host-status
+          // frame, so mark it online on connect.
+          if (this.#directUrl) {
+            this.#setHostOnline(true);
+          }
           resolve();
         });
         socket.on('error', reject);
@@ -152,6 +213,10 @@ export class RelayAssistantService {
     }
 
     if (frame.type === 'thinking') {
+      if (entry.firstChunkAt === null) {
+        entry.firstChunkAt = Date.now();
+      }
+
       if (typeof entry.onThinking === 'function' && frame.chunk) {
         entry.onThinking(frame.chunk);
       }
@@ -159,6 +224,15 @@ export class RelayAssistantService {
     }
 
     if (frame.type === 'token') {
+      const now = Date.now();
+      if (entry.firstChunkAt === null) {
+        entry.firstChunkAt = now;
+      }
+      if (entry.firstTokenAt === null) {
+        entry.firstTokenAt = now;
+      }
+      entry.chunks += 1;
+
       if (typeof entry.onToken === 'function' && frame.chunk) {
         entry.onToken(frame.chunk);
       }
@@ -167,12 +241,14 @@ export class RelayAssistantService {
 
     if (frame.type === 'result') {
       this.#pending.delete(frame.id);
+      logFlow({ ...entry, id: frame.id, doneAt: Date.now() });
       entry.resolve(frame.value);
       return;
     }
 
     if (frame.type === 'error') {
       this.#pending.delete(frame.id);
+      logFlow({ ...entry, id: frame.id, doneAt: Date.now(), error: frame.message ?? 'error' });
       entry.reject(new Error(frame.message ?? 'Relay request failed'));
     }
   }
@@ -180,7 +256,8 @@ export class RelayAssistantService {
   #handleClose() {
     const error = new Error('Relay connection closed before the response completed.');
 
-    for (const [, entry] of this.#pending) {
+    for (const [id, entry] of this.#pending) {
+      logFlow({ ...entry, id, doneAt: Date.now(), error: 'connection closed' });
       entry.reject(error);
     }
 

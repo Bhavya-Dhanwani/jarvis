@@ -18,6 +18,16 @@ export class CodingIntentService {
       };
     }
 
+    // Routing runs before every answer. A prompt with no workspace-action verb is
+    // almost always plain chat, so decide that locally and let the answer start
+    // streaming immediately instead of waiting on a full classification round trip.
+    if (!hasWorkspaceActionSignal(message)) {
+      return {
+        intent: 'chat',
+        reason: 'No workspace action detected; answering directly.',
+      };
+    }
+
     try {
       const reply = await this.assistantService.generateReply([
         {
@@ -91,4 +101,15 @@ function parseIntent(reply) {
 // Keep tiny social turns on the existing local fast path (greetings, thanks, "how are you").
 function isSimpleConversation(message) {
   return isSmallTalk(message);
+}
+
+// Verbs that imply acting on the workspace. Coding requests almost always contain one
+// ("fix the route", "add a test", "refactor app.js"); pure questions/explanations
+// ("what is recursion", "explain closures in javascript") do not. Only prompts with a
+// signal pay the model classification cost — everything else routes to chat instantly.
+const WORKSPACE_ACTION_SIGNAL = /\b(create|add|implement|build|scaffold|generate|write|code|fix|debug|patch|repair|resolve|refactor|rename|move|delete|remove|drop|update|change|edit|modify|replace|insert|append|migrate|install|configure|setup|wire|integrate|test|run|execute|deploy|commit|push|lint|format|optimize|review)\b/i;
+
+// True when the message looks like it asks Jarvis to do something to the workspace.
+function hasWorkspaceActionSignal(message) {
+  return WORKSPACE_ACTION_SIGNAL.test(String(message ?? ''));
 }

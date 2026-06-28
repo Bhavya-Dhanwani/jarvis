@@ -48,11 +48,52 @@ test('coding intent service classifies without reasoning', async () => {
     },
   });
 
-  await service.classify('what programming languages do you know?');
+  // Use a workspace-action prompt so it actually reaches the model (plain questions are
+  // now routed to chat locally without a model call).
+  await service.classify('refactor the auth module and add a test');
 
   assert.equal(receivedOptions.think, false);
   assert.equal(receivedOptions.maxContinuations, 0);
   assert.equal(receivedOptions.generationOptions.num_predict, 64);
+});
+
+// Verify plain questions never pay the classification round trip — they route to chat
+// locally so the answer can start streaming immediately.
+test('coding intent service routes plain questions to chat without a model call', async () => {
+  let calls = 0;
+  const service = createCodingIntentService({
+    assistantService: {
+      async generateReply() {
+        calls += 1;
+        return '{"intent":"code","reason":"should not be asked"}';
+      },
+    },
+  });
+
+  for (const question of ['what is recursion', 'explain closures in javascript', 'how does a hashmap work']) {
+    const decision = await service.classify(question);
+    assert.equal(decision.intent, 'chat');
+  }
+
+  assert.equal(calls, 0);
+});
+
+// Verify a workspace-action prompt still gets the careful model decision.
+test('coding intent service consults the model for workspace-action prompts', async () => {
+  let calls = 0;
+  const service = createCodingIntentService({
+    assistantService: {
+      async generateReply() {
+        calls += 1;
+        return '{"intent":"code","reason":"edits files"}';
+      },
+    },
+  });
+
+  const decision = await service.classify('add a logout button to the navbar component');
+
+  assert.equal(calls, 1);
+  assert.equal(decision.intent, 'code');
 });
 
 // Verify malformed classifier output safely stays in chat mode.

@@ -24,7 +24,7 @@ import {
   refreshAccessToken,
 } from '../services/authClientService.js';
 import { startBestTunnel } from '../services/tunnelService.js';
-import { createHostRelayAgent } from '../services/hostRelayAgent.js';
+import { createHostSocketServer, composeHostSocketUrl } from '../services/hostSocketServer.js';
 import { RelayAssistantService } from '../services/relayAssistantService.js';
 import {
   RUNTIME_MODES,
@@ -410,7 +410,8 @@ async function handleHostPublisherRuntime(context = {}) {
   return result;
 }
 
-// Whether to use the WebSocket relay (default) instead of the public tunnel.
+// Whether to use the direct host socket (default) instead of the legacy public Ollama
+// tunnel. Disable with JARVIS_RELAY=off to fall back to the HTTP tunnel path.
 function isRelayEnabled(context = {}, env = process.env) {
   if (typeof context.relayEnabled === 'boolean') {
     return context.relayEnabled;
@@ -419,9 +420,12 @@ function isRelayEnabled(context = {}, env = process.env) {
   return !/^(0|false|no|off)$/i.test(String(env.JARVIS_RELAY ?? '').trim());
 }
 
-// Run host mode over the relay: warm the model, then hold a WebSocket open to the
-// signaling server as the active host until the user stops it (Ctrl+C).
+// Run host mode with a DIRECT socket: the host runs its own WebSocket server, exposes it
+// through a tunnel, and publishes that socket URL to the signaling server (auth + link
+// exchange only). Clients then connect straight to this machine — the signaling server is
+// not in the data path. Holds open until the user stops it (Ctrl+C).
 async function runHostRelay({ context, env, auth, hostModelConfig, refresh, output }) {
+  const config = loadJarvisConfig({ env });
   const warm = context.warmLocalModel ?? warmLocalModel;
   const warmed = await warm(hostModelConfig);
   output(warmed
@@ -429,26 +433,39 @@ async function runHostRelay({ context, env, auth, hostModelConfig, refresh, outp
     : statusLine('warning', 'Model warm-up skipped', 'first request may be slow while the model loads'));
 
   const ollamaService = context.hostAssistantService ?? new OllamaService(hostModelConfig);
-  const getAccessToken = () => refresh({
+
+  // Start the host's own socket server (clients connect to it directly, key-gated).
+  const socketServer = (context.createHostSocketServer ?? createHostSocketServer)({
+    ollamaService,
+    output: (level, title, detail) => output(statusLine(level, title, detail)),
+  });
+  const { key } = await socketServer.start();
+
+  const accessToken = await refresh({
     serverUrl: auth.serverUrl,
     refreshToken: auth.refreshToken,
   });
 
-  const agent = (context.createHostRelayAgent ?? createHostRelayAgent)({
-    signalingServerUrl: auth.serverUrl,
-    getAccessToken,
-    ollamaService,
-    warm: () => warm(hostModelConfig),
-    // Re-warm well within the 30m keep_alive but rarely enough to never queue behind
-    // an active chat. Real requests also refresh keep_alive, so this is an idle guard.
-    warmIntervalMs: context.hostWarmIntervalMs ?? 600000,
-    output: (level, title, detail) => output(statusLine(level, title, detail)),
+  // Expose the socket server through a tunnel so internet clients can reach it. Verify the
+  // tunnel routes back to THIS server (its plain HTTP probe returns "jarvis-host").
+  const openTunnel = context.startBestTunnel ?? startBestTunnel;
+  const tunnel = await openTunnel({
+    localUrl: socketServer.localUrl(),
+    output: context.outputStream ?? process.stdout,
+    dataRoot: config?.dataRoot,
+    verify: context.verifyPublishedTunnel === false ? undefined : verifyHostSocketTunnel,
   });
 
-  output(successBox('Host mode is online over the relay. Clients can now reach this machine.'));
+  const socketUrl = composeHostSocketUrl(tunnel.url, key);
+  const publish = context.publishOllamaUrl ?? publishOllamaUrl;
+  await publish({ serverUrl: auth.serverUrl, accessToken, ollamaUrl: socketUrl });
+
+  output(successBox('Host mode is online. Clients connect directly to this machine.'));
+  output(statusLine('success', 'Published socket', socketUrl));
   output(card('HOST LINK', [
     ['Server', auth.serverUrl],
-    ['Transport', 'relay (websocket)'],
+    ['Transport', 'direct socket (websocket)'],
+    ['Provider', tunnel.provider],
     ['Model', hostModelConfig.model],
   ], { borderColor: 'green' }));
 
@@ -456,17 +473,44 @@ async function runHostRelay({ context, env, auth, hostModelConfig, refresh, outp
     status: 'ok',
     command: 'host',
     mode: RUNTIME_MODES.HOST,
-    transport: 'relay',
+    transport: 'direct-socket',
+    publishedUrl: socketUrl,
   };
 
-  const started = agent.start();
-
-  // Block on the keep-alive loop only in interactive mode; tests/non-TTY return now.
+  // Keep republishing the socket URL (server TTL is 45s) and the model warm until Ctrl+C.
   if (shouldKeepHostOnline(context)) {
-    await started;
+    await keepHostPublisherOnline({
+      context,
+      output,
+      publish,
+      serverUrl: auth.serverUrl,
+      accessToken,
+      // Republish the composed socket URL; kill the real tunnel process on stop.
+      tunnel: { url: socketUrl, process: tunnel.process },
+      localModelConfig: hostModelConfig,
+    });
+    socketServer.close();
   }
 
   return result;
+}
+
+// Confirm a published tunnel actually routes back to this host's socket server. The
+// server answers plain HTTP probes with "jarvis-host", so a tunnel pointing elsewhere
+// (or a provider whose edge is blocked) is rejected before we publish it.
+async function verifyHostSocketTunnel(url) {
+  try {
+    const response = await fetch(url, { method: 'GET' });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    const body = await response.text();
+    return body.includes('jarvis-host');
+  } catch {
+    return false;
+  }
 }
 
 async function resolveLocalOllamaTunnelTarget(host, context = {}) {
@@ -773,9 +817,10 @@ function shouldKeepClientWaiting(context = {}) {
   return outputStream.isTTY === true;
 }
 
-// For client mode with relay enabled, build a RelayAssistantService, connect it, and
-// wait for a host to be online. Injecting it as context.assistantService routes all
-// model calls over the WebSocket relay instead of an HTTP tunnel URL.
+// For client mode, claim the host's published socket URL from the signaling server, then
+// build a RelayAssistantService that connects DIRECTLY to the host (the signaling server
+// is only used for this link exchange). Injecting it as context.assistantService routes
+// all model calls straight to the host socket.
 async function setupClientRelayIfEnabled({ context, output }) {
   const env = context.env ?? process.env;
   const config = loadJarvisConfig({ env });
@@ -801,23 +846,65 @@ async function setupClientRelayIfEnabled({ context, output }) {
   }
 
   const refresh = context.refreshAccessToken ?? refreshAccessToken;
+  const accessToken = await refresh({ serverUrl: auth.serverUrl, refreshToken: auth.refreshToken });
+
+  output(statusLine('info', 'Host link', 'fetching the host socket URL from the server...'));
+
+  const directUrl = await claimHostSocketUrl({ context, output, auth, accessToken });
+
+  if (!directUrl) {
+    output(statusLine('warning', 'Waiting for host', 'no host has published a socket URL yet'));
+    return;
+  }
+
   const relay = (context.createRelayAssistant ?? createRelayAssistant)({
     signalingServerUrl: auth.serverUrl,
     getAccessToken: () => refresh({ serverUrl: auth.serverUrl, refreshToken: auth.refreshToken }),
+    directUrl,
   });
-
-  output(statusLine('info', 'Relay', 'connecting to the host through the signaling server...'));
 
   try {
     await relay.connect();
-    const keepWaiting = shouldKeepClientWaiting(context);
-    await relay.waitForHost(keepWaiting ? 0 : (context.relayHostWaitMs ?? 5000));
-    output(statusLine('success', 'Relay ready', 'host is online; responses will stream live'));
+    output(statusLine('success', 'Connected', 'streaming directly from the host'));
   } catch (error) {
-    output(statusLine('warning', 'Waiting for host', error.message ?? 'no host online yet'));
+    output(statusLine('warning', 'Host connect failed', error.message ?? 'could not reach the host socket'));
   }
 
   context.assistantService = relay;
+}
+
+// Poll the signaling server's claim endpoint until the host has published a socket URL
+// (or attempts run out). Returns the URL string, or null when none is available.
+async function claimHostSocketUrl({ context, output, auth, accessToken }) {
+  const claim = context.claimOllamaUrl ?? claimOllamaUrl;
+  const keepWaiting = shouldKeepClientWaiting(context);
+  const maxAttempts = keepWaiting ? Infinity : (context.clientUrlMaxAttempts ?? 1);
+  const pollIntervalMs = context.clientUrlPollIntervalMs ?? DEFAULT_CLIENT_URL_POLL_INTERVAL_MS;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const claimed = await claim({ serverUrl: auth.serverUrl, accessToken });
+      const url = claimed.data?.url;
+
+      if (url) {
+        return url;
+      }
+    } catch (error) {
+      if (attempt >= maxAttempts) {
+        output(statusLine('warning', 'Server claim failed', error.message));
+        return null;
+      }
+    }
+
+    if (attempt >= maxAttempts) {
+      return null;
+    }
+
+    output(statusLine('warning', 'URL not available', 'waiting for the host to publish one'));
+    await wait(pollIntervalMs);
+  }
+
+  return null;
 }
 
 // Indirection so tests can inject a fake relay assistant.

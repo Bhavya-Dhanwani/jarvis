@@ -79,7 +79,9 @@ async function waitForSend(sockets) {
 test('generateReply streams tokens through onToken and resolves on result', async () => {
   const { service, sockets } = makeService();
   const tokens = [];
-  const replyPromise = service.generateReply([{ role: 'user', content: 'hey' }], {
+  // Use a real question (not small talk) so the call actually crosses the relay; casual
+  // greetings are now answered locally without a round trip.
+  const replyPromise = service.generateReply([{ role: 'user', content: 'what is recursion' }], {
     onToken: (chunk) => tokens.push(chunk),
   });
 
@@ -87,7 +89,7 @@ test('generateReply streams tokens through onToken and resolves on result', asyn
   const call = socket.sent[0];
   assert.equal(call.type, 'call');
   assert.equal(call.method, 'generateReply');
-  assert.deepEqual(call.args.messages, [{ role: 'user', content: 'hey' }]);
+  assert.deepEqual(call.args.messages, [{ role: 'user', content: 'what is recursion' }]);
 
   socket.receive({ type: 'token', id: call.id, chunk: 'Hi ' });
   socket.receive({ type: 'token', id: call.id, chunk: 'there' });
@@ -96,6 +98,46 @@ test('generateReply streams tokens through onToken and resolves on result', asyn
   const reply = await replyPromise;
   assert.equal(reply, 'Hi there');
   assert.deepEqual(tokens, ['Hi ', 'there']);
+  service.close();
+});
+
+test('generateReply answers casual greetings locally without touching the relay', async () => {
+  const { service, sockets } = makeService();
+  const tokens = [];
+
+  const reply = await service.generateReply([{ role: 'user', content: 'yooo bro how are you ?' }], {
+    onToken: (chunk) => tokens.push(chunk),
+  });
+
+  assert.match(reply, /\w/);
+  assert.equal(tokens.join(''), reply);
+  // No socket frame should have been sent for pure small talk.
+  assert.equal(sockets[0]?.sent?.length ?? 0, 0);
+  service.close();
+});
+
+test('generateReply strips inline think tags streamed by an out-of-date host', async () => {
+  const { service, sockets } = makeService();
+  const tokens = [];
+  const thinking = [];
+  const replyPromise = service.generateReply([{ role: 'user', content: 'who are you' }], {
+    onToken: (chunk) => tokens.push(chunk),
+    onThinking: (chunk) => thinking.push(chunk),
+  });
+
+  const socket = await waitForSend(sockets);
+  const call = socket.sent[0];
+
+  // Host streams reasoning inline as <think> tokens (split across frames) then the answer.
+  socket.receive({ type: 'token', id: call.id, chunk: '<think>just ' });
+  socket.receive({ type: 'token', id: call.id, chunk: 'reasoning</think>I am ' });
+  socket.receive({ type: 'token', id: call.id, chunk: 'Jarvis.' });
+  socket.receive({ type: 'result', id: call.id, value: '<think>just reasoning</think>I am Jarvis.' });
+
+  const reply = await replyPromise;
+  assert.equal(reply, 'I am Jarvis.');
+  assert.equal(tokens.join(''), 'I am Jarvis.');
+  assert.equal(thinking.join(''), 'just reasoning');
   service.close();
 });
 

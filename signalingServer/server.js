@@ -1,9 +1,7 @@
 // Importing modules
-import { createServer } from "node:http";
 import createApp from "./src/app.js";
 import env from "./src/shared/config/env.config.js";
 import connectDB from "./src/shared/config/db.config.js";
-import { attachRelay } from "./src/relay/relay.js";
 
 // function to start the server
 async function startServer() {
@@ -14,15 +12,11 @@ async function startServer() {
     // making the app
     const app = createApp();
 
-    // wrapping the app in an HTTP server so the WebSocket relay can share the port
-    const server = createServer(app);
-
-    // attaching the host<->client WebSocket relay at /relay
-    attachRelay(server);
-
-    // starting the server
-    server.listen(env.PORT, () => {
-        void console.log(`Server started on http://localhost:${env.PORT} (relay on /relay)`);
+    // The signaling server now only handles auth + the publish/claim link exchange.
+    // Hosts run their own WebSocket server and clients connect to it directly, so there
+    // is no longer a /relay WebSocket in the data path.
+    app.listen(env.PORT, () => {
+        void console.log(`Server started on http://localhost:${env.PORT} (auth + link exchange only)`);
     })
 
 }

@@ -159,6 +159,9 @@ export class OllamaService {
     // coding agent passes false); otherwise reasoning is enabled in config AND only
     // for complex prompts, so short/casual messages skip the ~10s reasoning step.
     let wantThink = this.#shouldThink(think, latestUserContent(messages));
+    // Guard so an empty (reasoning-only) length stop forces a direct answer just once,
+    // instead of re-prompting forever — the loop that produced runaway "thinking".
+    let forcedDirectAnswer = false;
 
     for (let attempt = 0; attempt <= continuationLimit; attempt++) {
       let result;
@@ -197,12 +200,22 @@ export class OllamaService {
         return reply.trim();
       }
 
-      // Reasoning that consumes the whole token budget before any answer leaves an
-      // empty turn. Re-prompting with "continue where you stopped" then makes thinking
-      // models ramble about that instruction instead of answering, so disable thinking
-      // and retry the original prompt so the budget goes to the answer.
-      if (wantThink && !reply.trim()) {
+      // A length stop with no answer means the budget was spent reasoning (the separate
+      // thinking field OR inline <think>...</think> in content) before any answer. The
+      // "continue where you stopped" prompt then makes thinking models loop forever on
+      // that instruction. So never inject it without answer content: disable thinking and
+      // demand a direct answer once; if that still yields nothing, stop instead of looping.
+      if (!reply.trim()) {
+        if (forcedDirectAnswer) {
+          break;
+        }
+
+        forcedDirectAnswer = true;
         wantThink = false;
+        requestMessages = [
+          ...requestMessages,
+          { role: 'user', content: 'Answer directly and briefly now. Do not show any reasoning or thinking.' },
+        ];
         continue;
       }
 
@@ -461,7 +474,7 @@ export function isSmallTalk(content) {
 }
 
 // Answer tiny social turns locally so the first prompt does not need to load the model.
-function createLocalFastReply(messages) {
+export function createLocalFastReply(messages) {
   const latestUserMessage = [...messages].reverse().find((message) => message.role === 'user');
   const content = latestUserMessage?.content?.trim().toLowerCase() ?? '';
 
@@ -511,7 +524,7 @@ async function drainResponse(response) {
 // content instead of Ollama's separate `thinking` field. Route that reasoning to the
 // thinking channel (dimmed + collapsed by the UI) so it never pollutes the real answer.
 // The router buffers across chunks so a tag split between reads is still detected.
-function createThinkTagRouter({ onAnswer, onThink }) {
+export function createThinkTagRouter({ onAnswer, onThink }) {
   const OPEN = '<think>';
   const CLOSE = '</think>';
   let inside = false;
@@ -562,7 +575,7 @@ function createThinkTagRouter({ onAnswer, onThink }) {
 }
 
 // Remove inline <think>...</think> reasoning from a non-streamed answer.
-function stripThinkTags(text) {
+export function stripThinkTags(text) {
   return String(text ?? '')
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<\/?think>/gi, '')

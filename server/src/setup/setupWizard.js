@@ -458,7 +458,12 @@ async function ensureOllamaInstalled(system, prompts, { output }) {
       throw new Error('Setup stopped before running the Ollama installer.');
     }
 
-    await withSpinner('Running official Ollama installer', () => runUnixOllamaInstall(), { output });
+    // Run the installer with its output visible (no spinner). The official installer can
+    // ask for your password (sudo) and prints its own download progress — hiding that
+    // behind a spinner made it look frozen while it silently waited for input.
+    output.write(statusLine('info', 'Running official Ollama installer', 'it may ask for your password (sudo)'));
+    await runUnixOllamaInstall();
+    output.write(statusLine('success', 'Ollama installer finished', 'verifying installation'));
   }
 
   const afterInstall = await withSpinner('Verifying Ollama installation', () => getOllamaVersion(), { output });
@@ -574,12 +579,17 @@ async function ensureSelectedModel(prompts, { defaultModel, output }) {
     throw new Error(`Setup stopped. Pull "${selectedModel}" later with: ollama pull ${selectedModel}`);
   }
 
-  const result = await withProgress(`Downloading model core ${selectedModel}`, () => (
-    pullModel(selectedModel, { stdio: ['ignore', 'pipe', 'pipe'] })
-  ), { output, durationMs: 2500 });
+  // Stream Ollama's REAL download progress (percent, size, speed) by inheriting stdio.
+  // The previous fake timed progress bar filled to ~100% in a couple of seconds and then
+  // sat there for minutes while the multi-GB pull continued silently, which looked like
+  // an infinite freeze at 100%.
+  output.write(statusLine('info', 'Downloading model core', `${selectedModel} — this can take several minutes`));
+  output.write(`${theme.muted('Live progress from Ollama is shown below; the wizard continues when it finishes.')}\n`);
+
+  const result = await pullModel(selectedModel, { stdio: 'inherit' });
 
   if (!result.ok) {
-    throw new Error(result.stderr || `Failed to pull model "${selectedModel}".`);
+    throw new Error(`Failed to pull model "${selectedModel}". Run "ollama pull ${selectedModel}" to see the full error.`);
   }
 
   output.write(statusLine('success', 'Model core downloaded', selectedModel));
