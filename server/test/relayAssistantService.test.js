@@ -76,6 +76,23 @@ async function waitForSend(sockets) {
   return sockets[0];
 }
 
+// Poll a predicate until it returns a truthy value or the timeout elapses.
+async function waitFor(predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const value = predicate();
+
+    if (value) {
+      return value;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+
+  return predicate();
+}
+
 test('generateReply streams tokens through onToken and resolves on result', async () => {
   const { service, sockets } = makeService();
   const tokens = [];
@@ -138,6 +155,75 @@ test('generateReply strips inline think tags streamed by an out-of-date host', a
   assert.equal(reply, 'I am Jarvis.');
   assert.equal(tokens.join(''), 'I am Jarvis.');
   assert.equal(thinking.join(''), 'just reasoning');
+  service.close();
+});
+
+test('the relay retries a transient socket handshake failure then connects', async () => {
+  let attempts = 0;
+  const made = [];
+
+  class RetrySocket {
+    constructor(url) {
+      this.url = url;
+      this.OPEN = 1;
+      this.readyState = 0;
+      this.sent = [];
+      this.handlers = {};
+      attempts += 1;
+      const failFirst = attempts === 1;
+      made.push(this);
+      queueMicrotask(() => {
+        if (failFirst) {
+          // Simulate a tunnel 408 on the first WebSocket upgrade.
+          this.emit('error', new Error('Unexpected server response: 408'));
+          this.readyState = 3;
+          this.emit('close');
+        } else {
+          this.readyState = this.OPEN;
+          this.emit('open');
+        }
+      });
+    }
+
+    on(event, cb) {
+      (this.handlers[event] ??= []).push(cb);
+      return this;
+    }
+
+    emit(event, ...args) {
+      for (const cb of this.handlers[event] ?? []) {
+        cb(...args);
+      }
+    }
+
+    send(value) {
+      this.sent.push(JSON.parse(value));
+    }
+
+    close() {
+      this.readyState = 3;
+      this.emit('close');
+    }
+
+    receive(frame) {
+      this.emit('message', Buffer.from(JSON.stringify(frame)));
+    }
+  }
+
+  const service = new RelayAssistantService({
+    directUrl: 'ws://host/socket?key=k',
+    WebSocketImpl: RetrySocket,
+  });
+
+  const warm = service.warmUp();
+
+  // Wait for the retry to open a second socket and send the warmUp call (first attempt
+  // 408s, then a ~400ms backoff before the retry).
+  const connected = await waitFor(() => (made[1]?.sent.length ? made[1] : null), 2000);
+  connected.receive({ type: 'result', id: connected.sent[0].id, value: { ok: true } });
+
+  await warm;
+  assert.equal(attempts >= 2, true);
   service.close();
 });
 

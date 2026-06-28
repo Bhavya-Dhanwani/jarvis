@@ -30,7 +30,7 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       output.write(section('SESSION CORE'));
       output.write(statusLine('success', title, chat.id));
       output.write(`${theme.info('i')} ${theme.title('Messages loaded')}: ${messageCount}\n`);
-      output.write(statusLine('info', 'Ollama model', modelConfig?.model ?? 'not configured'));
+      output.write(statusLine('info', 'Ollama model', formatModelLine(modelConfig)));
       output.write(statusLine('info', 'Workspace', cwd));
       output.write(statusLine('info', 'Git branch', branch));
       output.write('\n');
@@ -45,6 +45,13 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
 
     saved() {
       output.write(statusLine('success', 'Saved', 'message persisted locally'));
+    },
+
+    // Background warm-up failed. Jarvis is still usable (it warms on the first message),
+    // so report it as a soft note — never as "unavailable".
+    warmSkipped(reason) {
+      const detail = reason ? `warms on first message (${truncate(String(reason), 60)})` : 'warms on first message';
+      output.write(statusLine('warning', 'Model warm-up skipped', detail));
     },
 
     thinking(action) {
@@ -146,6 +153,24 @@ export function createTerminalUi({ output = process.stdout, cwd = process.cwd() 
       output.write(warningBox(`Jarvis unavailable: ${message}`));
     },
   };
+}
+
+// Header model line: show per-role routing when multiple models are configured, else the
+// single model. Keeps the session header honest about multi-model setups.
+function formatModelLine(modelConfig) {
+  const model = modelConfig?.model;
+
+  if (!model) {
+    return 'not configured';
+  }
+
+  const models = modelConfig?.models;
+
+  if (models && (models.coding !== model || models.fast !== model)) {
+    return `${models.main} ${theme.dim('· coding')} ${models.coding} ${theme.dim('· fast')} ${models.fast}`;
+  }
+
+  return model;
 }
 
 async function getGitBranch(cwd) {

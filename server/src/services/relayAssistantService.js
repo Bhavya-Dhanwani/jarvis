@@ -159,40 +159,72 @@ export class RelayAssistantService {
       return this.#connecting;
     }
 
-    this.#connecting = (async () => {
-      // Direct mode: connect to the host's published socket URL (key already embedded).
-      // Legacy relay mode: derive the signaling server's /relay URL with an auth token.
-      const url = this.#directUrl
-        ?? toRelayUrl(this.#signalingServerUrl, { role: 'client', token: await this.#getAccessToken() });
-      const socket = new this.#WebSocketImpl(url);
-      this.#socket = socket;
-
-      socket.on('message', (raw) => this.#handleMessage(raw));
-      socket.on('close', () => this.#handleClose());
-      socket.on('error', () => {
-        // 'close' handles cleanup.
-      });
-
-      await new Promise((resolve, reject) => {
-        socket.on('open', () => {
-          // Flush frames immediately so streamed tokens arrive without Nagle batching.
-          socket._socket?.setNoDelay?.(true);
-          // In direct mode the connected host IS the host — there is no host-status
-          // frame, so mark it online on connect.
-          if (this.#directUrl) {
-            this.#setHostOnline(true);
-          }
-          resolve();
-        });
-        socket.on('error', reject);
-      });
-    })();
+    this.#connecting = this.#connectWithRetry();
 
     try {
       await this.#connecting;
     } finally {
       this.#connecting = null;
     }
+  }
+
+  // Open the socket, retrying transient handshake failures (e.g. a tunnel returning 408
+  // before the host is ready). Without this, a single cold-start hiccup made warm-up and
+  // the first message fail outright.
+  async #connectWithRetry(attempts = 3) {
+    // Direct mode: connect to the host's published socket URL (key already embedded).
+    // Legacy relay mode: derive the signaling server's /relay URL with an auth token.
+    const url = this.#directUrl
+      ?? toRelayUrl(this.#signalingServerUrl, { role: 'client', token: await this.#getAccessToken() });
+    let lastError = null;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        await this.#openSocket(url);
+        return;
+      } catch (error) {
+        lastError = error;
+        this.#socket = null;
+
+        if (attempt < attempts - 1) {
+          await delay(400 * (attempt + 1));
+        }
+      }
+    }
+
+    throw lastError ?? new Error('Could not connect to the host socket.');
+  }
+
+  #openSocket(url) {
+    return new Promise((resolve, reject) => {
+      const socket = new this.#WebSocketImpl(url);
+      this.#socket = socket;
+      let settled = false;
+
+      socket.on('message', (raw) => this.#handleMessage(raw));
+      socket.on('close', () => this.#handleClose());
+
+      socket.on('open', () => {
+        settled = true;
+        // Flush frames immediately so streamed tokens arrive without Nagle batching.
+        socket._socket?.setNoDelay?.(true);
+        // In direct mode the connected host IS the host — there is no host-status frame,
+        // so mark it online on connect.
+        if (this.#directUrl) {
+          this.#setHostOnline(true);
+        }
+        resolve();
+      });
+
+      socket.on('error', (error) => {
+        // Only the handshake failure rejects the connect; later errors are handled by
+        // 'close' so they don't double-settle this promise.
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      });
+    });
   }
 
   #handleMessage(raw) {
@@ -287,4 +319,10 @@ function parseJson(raw) {
   } catch {
     return null;
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

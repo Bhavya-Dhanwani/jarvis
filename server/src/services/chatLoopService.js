@@ -122,10 +122,12 @@ export class ChatLoopService {
     }
   }
 
-  // Warm the local model without blocking the prompt.
+  // Warm the local model without blocking the prompt. Warm-up is a background
+  // optimization: if it fails, Jarvis is still available and warms on the first message,
+  // so this must NOT report Jarvis as unavailable.
   #startBackgroundWarmAssistant() {
     this.chatService.warmAssistant().catch((error) => {
-      this.ui.unavailable(`model warm-up skipped: ${error.message}`);
+      this.ui.warmSkipped?.(error.message);
     });
   }
 
