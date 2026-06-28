@@ -112,37 +112,9 @@ function delay(ms) {
 // Build the ordered list of tunnel techniques available on this machine.
 async function resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot }) {
   const providers = [];
-  const cloudflaredArgs = buildCloudflaredArgs(localUrl);
 
-  if (await commandExists('cloudflared')) {
-    providers.push({
-      name: 'cloudflared',
-      start: () => startTunnelProcess({
-        command: 'cloudflared',
-        args: cloudflaredArgs,
-        pattern: CLOUDFLARED_URL_PATTERN,
-        output,
-        timeoutMs,
-      }),
-    });
-  } else {
-    const managedCloudflared = await ensureManagedCloudflared({ dataRoot, output });
-
-    if (managedCloudflared) {
-      providers.push({
-        name: 'cloudflared',
-        start: () => startTunnelProcess({
-          command: managedCloudflared,
-          provider: 'cloudflared',
-          args: cloudflaredArgs,
-          pattern: CLOUDFLARED_URL_PATTERN,
-          output,
-          timeoutMs,
-        }),
-      });
-    }
-  }
-
+  // ngrok is the most reliable WebSocket-capable tunnel (no UDP blocked, stable upgrades).
+  // Try it first when installed.
   if (await commandExists('ngrok')) {
     providers.push({
       name: 'ngrok',
@@ -165,6 +137,8 @@ async function resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot })
     name: 'localtunnel',
     start: () => startLocaltunnel({ localUrl, output, timeoutMs }),
   });
+
+  // cloudflared removed: unreliable WebSocket upgrades (documented issue).
 
   return providers;
 }
