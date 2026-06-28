@@ -8,6 +8,31 @@ import { toRelayUrl } from './relayUrl.js';
 import { createLocalFastReply, createThinkTagRouter, stripThinkTags } from './ollamaService.js';
 import { logFlow } from './flowLogger.js';
 
+// Bound each WebSocket handshake so a stuck tunnel upgrade can't hang the client.
+const CONNECT_TIMEOUT_MS = 8000;
+
+// Options for the `ws` client: a handshake timeout plus headers that get past tunnel
+// interstitials (localtunnel's reminder page blocks plain upgrades without these). The
+// injected fake sockets in tests simply ignore the second argument.
+function socketConnectOptions(url) {
+  const options = { handshakeTimeout: CONNECT_TIMEOUT_MS };
+
+  try {
+    const { hostname } = new URL(url);
+
+    if (hostname.endsWith('.loca.lt') || hostname.endsWith('.trycloudflare.com') || hostname.endsWith('.ngrok-free.app')) {
+      options.headers = {
+        'bypass-tunnel-reminder': 'true',
+        'User-Agent': 'jarvis-client',
+      };
+    }
+  } catch {
+    // Non-URL (tests): no extra headers needed.
+  }
+
+  return options;
+}
+
 export class RelayAssistantService {
   #signalingServerUrl;
   #getAccessToken;
@@ -197,15 +222,37 @@ export class RelayAssistantService {
 
   #openSocket(url) {
     return new Promise((resolve, reject) => {
-      const socket = new this.#WebSocketImpl(url);
+      const socket = new this.#WebSocketImpl(url, socketConnectOptions(url));
       this.#socket = socket;
       let settled = false;
+
+      // Never let a half-open handshake hang the client forever (a tunnel can accept the
+      // TCP connection but stall the WebSocket upgrade). Reject after a bound so the retry
+      // loop can try again or surface a clear error instead of "fetching" indefinitely.
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        try {
+          (socket.terminate ?? socket.close)?.call(socket);
+        } catch {
+          // Ignore errors tearing down a stuck socket.
+        }
+        reject(new Error('Timed out connecting to the host socket.'));
+      }, CONNECT_TIMEOUT_MS);
 
       socket.on('message', (raw) => this.#handleMessage(raw));
       socket.on('close', () => this.#handleClose());
 
       socket.on('open', () => {
+        if (settled) {
+          return;
+        }
+
         settled = true;
+        clearTimeout(timer);
         // Flush frames immediately so streamed tokens arrive without Nagle batching.
         socket._socket?.setNoDelay?.(true);
         // In direct mode the connected host IS the host — there is no host-status frame,
@@ -221,6 +268,7 @@ export class RelayAssistantService {
         // 'close' so they don't double-settle this promise.
         if (!settled) {
           settled = true;
+          clearTimeout(timer);
           reject(error);
         }
       });

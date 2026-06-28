@@ -427,11 +427,6 @@ function isRelayEnabled(context = {}, env = process.env) {
 async function runHostRelay({ context, env, auth, hostModelConfig, refresh, output }) {
   const config = loadJarvisConfig({ env });
   const warm = context.warmLocalModel ?? warmLocalModel;
-  const warmed = await warm(hostModelConfig);
-  output(warmed
-    ? statusLine('success', 'Model warm', `${hostModelConfig.model} loaded and kept resident`)
-    : statusLine('warning', 'Model warm-up skipped', 'first request may be slow while the model loads'));
-
   const ollamaService = context.hostAssistantService ?? new OllamaService(hostModelConfig);
 
   // Start the host's own socket server (clients connect to it directly, key-gated).
@@ -468,6 +463,16 @@ async function runHostRelay({ context, env, auth, hostModelConfig, refresh, outp
     ['Provider', tunnel.provider],
     ['Model', hostModelConfig.model],
   ], { borderColor: 'green' }));
+
+  // Warm the model in the BACKGROUND so the host is reachable IMMEDIATELY. Publishing
+  // before warming is safe over a socket: a cold first request just streams whenever the
+  // model finishes loading (no HTTP request timeout to cut it off). Warming before
+  // publishing previously delayed the published URL by minutes, so clients saw no host.
+  warm(hostModelConfig)
+    .then((ok) => output(ok
+      ? statusLine('success', 'Model warm', `${hostModelConfig.model} loaded and kept resident`)
+      : statusLine('warning', 'Model warm-up skipped', 'first request loads the model on demand')))
+    .catch(() => {});
 
   const result = {
     status: 'ok',
@@ -941,40 +946,28 @@ async function warmLocalModel(modelConfig) {
     return false;
   }
 
-  // Keep every distinct role model resident (multi-model routing), so coding/fast don't
-  // unload between requests. Single-model setups warm just the one model.
-  const models = [...new Set([
-    modelConfig.model,
-    modelConfig.models?.main,
-    modelConfig.models?.coding,
-    modelConfig.models?.fast,
-  ].filter(Boolean))];
+  // Warm only the primary model so the host stays responsive quickly. The coding/fast
+  // role models load on demand on first use (and stay resident per keep_alive) — warming
+  // all three up front took minutes and stalled host startup.
+  try {
+    const response = await fetch(`${modelConfig.host}/api/generate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: modelConfig.model,
+        prompt: '',
+        stream: false,
+        keep_alive: '30m',
+        // Preload at the same num_ctx/num_batch the chat requests use, otherwise the
+        // first real prompt changes a load-time parameter and Ollama reloads the model.
+        options: warmLoadOptions(modelConfig.options),
+      }),
+    });
 
-  let warmedAny = false;
-
-  for (const model of models) {
-    try {
-      const response = await fetch(`${modelConfig.host}/api/generate`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          prompt: '',
-          stream: false,
-          keep_alive: '30m',
-          // Preload at the same num_ctx/num_batch the chat requests use, otherwise the
-          // first real prompt changes a load-time parameter and Ollama reloads the model.
-          options: warmLoadOptions(modelConfig.options),
-        }),
-      });
-
-      warmedAny = warmedAny || response.ok;
-    } catch {
-      // Keep warming the remaining models even if one fails.
-    }
+    return response.ok;
+  } catch {
+    return false;
   }
-
-  return warmedAny;
 }
 
 // Pick only the load-time options so the host preload matches real request loads.

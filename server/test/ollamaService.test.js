@@ -521,9 +521,9 @@ test('generateToolTurn falls back when the model rejects think', async () => {
   }
 });
 
-// Verify multi-model warm-up preloads every distinct role model so routing never pays a
-// cold load on first use.
-test('warmUp preloads all distinct role models', async () => {
+// Verify warm-up loads ONLY the primary model so startup stays fast (the other role
+// models load on demand). Warming all three up front stalled host/client startup.
+test('warmUp warms only the primary model', async () => {
   const originalFetch = globalThis.fetch;
   const warmedModels = [];
 
@@ -544,7 +544,7 @@ test('warmUp preloads all distinct role models', async () => {
 
     await service.warmUp();
 
-    assert.deepEqual(warmedModels.sort(), ['coding-model', 'fast-model', 'main-model']);
+    assert.deepEqual(warmedModels, ['main-model']);
   } finally {
     globalThis.fetch = originalFetch;
   }

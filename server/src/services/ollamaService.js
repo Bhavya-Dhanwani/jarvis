@@ -99,24 +99,10 @@ export class OllamaService {
   }
 
   async #loadModel() {
-    // Preload every distinct role model so multi-model routing never pays a cold load on
-    // first use. Single-model setups warm just the one model. The first failure surfaces.
-    const models = this.#installedModels();
-    let lastError = null;
-
-    for (const model of models) {
-      try {
-        await this.#loadOneModel(model);
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    // Only fail the warm-up if NO model could be loaded; a partial multi-model warm still
-    // lets routing fall back to whatever did load.
-    if (lastError && models.length === 1) {
-      throw lastError;
-    }
+    // Warm only the primary model so warm-up is fast. The coding/fast role models load on
+    // demand on first use; warming all three up front took minutes and made the host (and
+    // the client's background warm-up over the socket) appear to hang.
+    await this.#loadOneModel(this.config.model);
   }
 
   async #loadOneModel(model) {
@@ -271,13 +257,6 @@ export class OllamaService {
 
     const autoRole = isComplexPrompt(content) ? 'main' : 'fast';
     return models[autoRole] ?? models.main ?? fallback;
-  }
-
-  // Distinct model names this service may run, so warm-up can preload all of them.
-  #installedModels() {
-    const models = this.config.models ?? {};
-    const names = [this.config.model, models.main, models.coding, models.fast].filter(Boolean);
-    return [...new Set(names)];
   }
 
   #shouldThink(override, content) {
