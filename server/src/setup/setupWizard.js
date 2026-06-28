@@ -31,7 +31,7 @@ import {
   runWindowsInstaller,
   validateWindowsDrive,
 } from './windowsSetup.js';
-import { runUnixOllamaInstall } from './unixSetup.js';
+import { isHomebrewAvailable, runMacBrewInstall, runUnixOllamaInstall } from './unixSetup.js';
 import { banner, playBootSequence, playOnlineSequence, typewriter } from '../ui/ascii.js';
 import { PromptSession } from '../ui/prompts.js';
 import { loading, withSpinner } from '../ui/spinner.js';
@@ -447,11 +447,39 @@ async function ensureOllamaInstalled(system, prompts, { output }) {
     if (installedPath) {
       await repairWindowsOllamaPath(installedPath, { output });
     }
+  } else if (system.isMac) {
+    // macOS: the Linux curl script does not install Ollama here, so use Homebrew (or, if
+    // Homebrew is missing, point the user at brew/the app instead of silently failing).
+    const brewAvailable = await withSpinner('Checking for Homebrew', () => isHomebrewAvailable(), { output });
+
+    if (!brewAvailable) {
+      throw new Error([
+        'Ollama cannot be installed automatically on this Mac: Homebrew was not found.',
+        'The Linux curl script does not install Ollama on macOS. Fix it with one of:',
+        '  - Install Homebrew from https://brew.sh, then re-run "jarvis setup", or',
+        '  - Download the Ollama app from https://ollama.com/download',
+      ].join('\n'));
+    }
+
+    output.write(warningBox('About to run: brew install ollama'));
+    const runInstall = await prompts.confirm('Install Ollama with Homebrew now?', {
+      defaultValue: true,
+      hint: 'Uses your existing Homebrew to install the Ollama runtime.',
+    });
+
+    if (!runInstall) {
+      throw new Error('Setup stopped. Install Ollama later with: brew install ollama');
+    }
+
+    // Run with output visible (no spinner) so any Homebrew prompt is not hidden.
+    output.write(statusLine('info', 'Installing Ollama via Homebrew', 'brew install ollama'));
+    await runMacBrewInstall();
+    output.write(statusLine('success', 'Homebrew install finished', 'verifying installation'));
   } else {
     output.write(warningBox('About to run: curl -fsSL https://ollama.com/install.sh | sh'));
     const runInstall = await prompts.confirm('Run official Ollama install command?', {
       defaultValue: true,
-      hint: 'This uses the official Ollama install method for macOS/Linux.',
+      hint: 'This uses the official Ollama install method for Linux.',
     });
 
     if (!runInstall) {

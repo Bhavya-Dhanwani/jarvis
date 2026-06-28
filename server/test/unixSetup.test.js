@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { runUnixOllamaInstall } from '../src/setup/unixSetup.js';
+import { isHomebrewAvailable, runMacBrewInstall, runUnixOllamaInstall } from '../src/setup/unixSetup.js';
 
 // Minimal stdin stand-in that starts in raw mode, like a prior interactive prompt leaves it.
 function makeStdin({ isTTY = true } = {}) {
@@ -79,4 +79,50 @@ test('runUnixOllamaInstall does not touch raw mode when stdin is not a TTY', asy
   await promise;
 
   assert.equal(stdin.calls.some((entry) => entry.startsWith('raw:')), false);
+});
+
+test('runMacBrewInstall runs "brew install ollama" with a cooked TTY', async () => {
+  const stdin = makeStdin();
+  const child = new EventEmitter();
+  let spawned = null;
+  const spawnFn = (cmd, args, opts) => {
+    spawned = { cmd, args, opts };
+    return child;
+  };
+
+  const promise = runMacBrewInstall({ spawnFn, stdin });
+
+  assert.equal(stdin.isRaw, false);
+  assert.equal(spawned.cmd, 'brew');
+  assert.deepEqual(spawned.args, ['install', 'ollama']);
+  assert.equal(spawned.opts.stdio, 'inherit');
+
+  child.emit('close', 0);
+  await promise;
+
+  assert.equal(stdin.isRaw, true);
+});
+
+test('isHomebrewAvailable resolves true when brew --version exits 0', async () => {
+  const child = new EventEmitter();
+  const promise = isHomebrewAvailable({ spawnFn: () => child });
+  child.emit('close', 0);
+  assert.equal(await promise, true);
+});
+
+test('isHomebrewAvailable resolves false when brew is missing', async () => {
+  const child = new EventEmitter();
+  const promise = isHomebrewAvailable({ spawnFn: () => child });
+  child.emit('error', new Error('spawn brew ENOENT'));
+  assert.equal(await promise, false);
+});
+
+test('isHomebrewAvailable resolves false when spawn throws synchronously', async () => {
+  const result = await isHomebrewAvailable({
+    spawnFn: () => {
+      throw new Error('ENOENT');
+    },
+  });
+
+  assert.equal(result, false);
 });

@@ -42,6 +42,10 @@ export function detectSystem() {
     supportedArch: ['x64', 'arm64'].includes(cpuArch),
     // Mark Windows for Windows-only setup decisions.
     isWindows: platform === 'win32',
+    // Mark macOS for Homebrew-based install decisions.
+    isMac: platform === 'darwin',
+    // Mark Linux for the curl installer path.
+    isLinux: platform === 'linux',
     // Mark macOS/Linux for Unix-style setup decisions.
     isUnix: platform === 'darwin' || platform === 'linux',
   };

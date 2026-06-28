@@ -1,20 +1,17 @@
-// Import spawn to run the official install command.
+// Import spawn to run the official install commands.
 import { spawn } from 'node:child_process';
 
-// Run the official Ollama install command for macOS/Linux.
-//
-// The installer uses `sudo`, which prompts for a password on the terminal. If a previous
-// interactive wizard prompt left stdin in raw mode (or Node is still reading it), that
-// password read never receives input and the install appears frozen at 100%. So before
-// running it we put the TTY back into normal (cooked) mode and stop Node from consuming
-// stdin, letting sudo prompt and read normally, then restore the prior state afterwards.
-export function runUnixOllamaInstall({ spawnFn = spawn, stdin = process.stdin } = {}) {
+// Run an installer command with its output (and any sudo/Homebrew prompt) attached to the
+// terminal. The child gets a cooked TTY with Node not consuming stdin, so password prompts
+// are read normally — a prior interactive prompt can leave stdin in raw mode, which made
+// the install appear frozen at 100% while it silently waited for input. State is restored
+// when the child exits.
+function runInstaller(command, args, { spawnFn = spawn, stdin = process.stdin } = {}) {
   return new Promise((resolve, reject) => {
     const isTty = stdin?.isTTY === true;
     const wasRaw = isTty ? stdin.isRaw === true : false;
     const wasPaused = typeof stdin?.isPaused === 'function' ? stdin.isPaused() : false;
 
-    // Hand the terminal to the child cleanly: cooked mode + Node not reading stdin.
     if (isTty && typeof stdin.setRawMode === 'function') {
       stdin.setRawMode(false);
     }
@@ -30,32 +27,58 @@ export function runUnixOllamaInstall({ spawnFn = spawn, stdin = process.stdin } 
       }
     };
 
-    // Run the exact official curl-to-sh installer command after confirmation.
-    const child = spawnFn('sh', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], {
-      // Attach installer output (and the sudo prompt) to the terminal.
-      stdio: 'inherit',
-      // Hide extra Windows console windows if somehow called there.
-      windowsHide: true,
-    });
+    let child;
 
-    // Reject if the installer process cannot start.
+    try {
+      child = spawnFn(command, args, { stdio: 'inherit', windowsHide: true });
+    } catch (error) {
+      restore();
+      reject(error);
+      return;
+    }
+
     child.on('error', (error) => {
       restore();
       reject(error);
     });
 
-    // Resolve or reject after the installer exits.
     child.on('close', (code) => {
       restore();
 
-      // Treat exit code 0 as success.
       if (code === 0) {
         resolve();
         return;
       }
 
-      // Reject with the installer exit code for troubleshooting.
-      reject(new Error(`Ollama install command exited with code ${code}.`));
+      reject(new Error(`Install command exited with code ${code}.`));
     });
+  });
+}
+
+// Linux: run the official Ollama curl-to-sh installer (uses sudo).
+export function runUnixOllamaInstall({ spawnFn = spawn, stdin = process.stdin } = {}) {
+  return runInstaller('sh', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], { spawnFn, stdin });
+}
+
+// macOS: install Ollama with Homebrew. The Linux curl script does not install Ollama on
+// macOS, so Homebrew (or the downloadable app) is the correct path.
+export function runMacBrewInstall({ spawnFn = spawn, stdin = process.stdin } = {}) {
+  return runInstaller('brew', ['install', 'ollama'], { spawnFn, stdin });
+}
+
+// Detect whether Homebrew is available (`brew --version` exits 0).
+export function isHomebrewAvailable({ spawnFn = spawn } = {}) {
+  return new Promise((resolve) => {
+    let child;
+
+    try {
+      child = spawnFn('brew', ['--version'], { stdio: 'ignore', windowsHide: true });
+    } catch {
+      resolve(false);
+      return;
+    }
+
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
   });
 }
