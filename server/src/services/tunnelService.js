@@ -79,7 +79,7 @@ export async function startBestTunnel({
     return lastTunnel;
   }
 
-  throw lastError ?? new Error('Could not prepare a tunnel automatically. Check your internet connection and run host setup again.');
+  throw lastError ?? new Error('No tunnel could carry the WebSocket. Install and authenticate ngrok (https://ngrok.com/download, then "ngrok config add-authtoken <token>") and run host again. localtunnel is only a fallback and is currently unreliable for WebSockets.');
 }
 
 // Probe a provider's URL repeatedly until it routes or the window elapses, so a
@@ -121,9 +121,9 @@ async function resolveTunnelProviders({ localUrl, output, timeoutMs, dataRoot })
       start: () => startTunnelProcess({
         command: 'ngrok',
         provider: 'ngrok',
-        // ngrok forwards its public hostname as the Host header by default, which
-        // Ollama rejects with a 403. Rewrite it to the local origin like cloudflared.
-        args: ['http', '--host-header', localHostHeader(localUrl) ?? 'localhost:11434', localUrl],
+        // ngrok v3 wants the upstream URL FIRST, then flags. `--host-header rewrite`
+        // rewrites the Host to the upstream so a local server checking Host is happy.
+        args: ['http', localUrl, '--host-header', 'rewrite'],
         pattern: NGROK_URL_PATTERN,
         output,
         timeoutMs,

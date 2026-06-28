@@ -524,7 +524,13 @@ async function verifyHostSocketTunnel(url, key) {
     let done = false;
     const socket = new WebSocket(socketUrl, {
       handshakeTimeout: 8000,
-      headers: { 'x-jarvis-device': 'host-self-check', 'bypass-tunnel-reminder': 'true', 'User-Agent': 'jarvis-client' },
+      headers: {
+        'x-jarvis-device': 'host-self-check',
+        'User-Agent': 'jarvis-client',
+        // Bypass tunnel interstitials so the WS handshake is not blocked during verify.
+        'bypass-tunnel-reminder': 'true',
+        'ngrok-skip-browser-warning': 'true',
+      },
     });
 
     const finish = (ok) => {

@@ -33,8 +33,15 @@ function socketConnectOptions(url) {
   try {
     const { hostname: host } = new URL(url);
 
-    if (host.endsWith('.loca.lt') || host.endsWith('.trycloudflare.com') || host.endsWith('.ngrok-free.app')) {
+    if (host.endsWith('.loca.lt')) {
+      // localtunnel's reminder page blocks plain upgrades without this.
       headers['bypass-tunnel-reminder'] = 'true';
+    }
+
+    if (host.endsWith('.ngrok-free.app') || host.endsWith('.ngrok.app') || host.endsWith('.ngrok.io')) {
+      // ngrok-free serves a browser interstitial that breaks the WS upgrade unless this
+      // header is present.
+      headers['ngrok-skip-browser-warning'] = 'true';
     }
   } catch {
     // Non-URL (tests): the device header is still fine to send.
