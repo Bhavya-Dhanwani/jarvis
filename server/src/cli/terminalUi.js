@@ -450,6 +450,38 @@ function createCodingRenderer(output) {
         return;
       }
 
+      case 'agent.stream.started': {
+        if (agent) {
+          agent.streamText = '';
+        }
+
+        if (!isTty) {
+          output.write(`  ${statusLine('info', `${event.agent}`, 'writing…')}`);
+        }
+        return;
+      }
+
+      case 'agent.stream': {
+        if (agent) {
+          agent.streamText = (agent.streamText ?? '') + (event.chunk ?? '');
+          // Surface the latest line live in the spinner so the plan/PRD is visibly streaming.
+          agent.activity = lastLine(agent.streamText);
+          refresh();
+        }
+        return;
+      }
+
+      case 'agent.stream.completed': {
+        const secs = ((event.elapsedMs ?? 0) / 1000).toFixed(1);
+
+        if (agent) {
+          agent.activity = '';
+        }
+
+        persist(theme.success('✦'), theme.muted(`${event.agent} wrote ${event.chars ?? 0} chars in ${secs}s`));
+        return;
+      }
+
       case 'tool.started': {
         const path = event.args?.path;
 
@@ -508,7 +540,10 @@ function createCodingRenderer(output) {
 
         const detail = String(event.result?.output ?? event.result?.summary ?? '').trim();
         if (detail && !agent?.files.length) {
-          output.write(`${theme.muted(indent(truncate(detail, 600)))}\n`);
+          // Planner/PRD/review produce the actual plan + requirements the user asked to see,
+          // so print them in full; other text stays trimmed.
+          const isPlanText = new Set(['planner', 'prd', 'review']).has(event.task.agent);
+          output.write(`${theme.muted(indent(isPlanText ? detail : truncate(detail, 600)))}\n`);
         }
 
         agent = null;

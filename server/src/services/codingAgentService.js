@@ -184,41 +184,42 @@ function createModelWorkerPool(assistantService) {
       return runToolAgent({ assistantService, agent, task, context, messages });
     }
 
-    // Reasoning agents (planner/prd) stream their thinking to the UI; implementation
-    // agents use the tool loop. think stays off for the tool-running default path so
-    // its token budget goes to the answer.
+    // Planner/PRD produce the plan and requirements. Reasoning ("think") mode made the big
+    // model generate minutes of chain-of-thought before answering, which stalled the whole
+    // coding run. Instead, stream the plan/PRD text DIRECTLY (think off) so it is fast and
+    // visible live. Implementation agents without a tool loop use the coding model.
     const isReasoner = new Set(['planner', 'prd']).has(agent);
 
-    // Track reasoning so the client can show it live and collapse it on completion.
-    let thinkChars = 0;
-    let thinkStartedAt = null;
+    // Track the streamed plan/PRD so the client can show it live and collapse on completion.
+    let streamChars = 0;
+    let streamStartedAt = null;
 
     const output = await assistantService.generateReply(messages, isReasoner
       ? {
-        // Planner/PRD reason about the task, so use the main (reasoning) model.
+        // The capable model writes the plan/PRD, but without slow reasoning, and bounded
+        // so it cannot run away for minutes.
         role: 'main',
-        generationOptions: { num_predict: 256 },
-        maxContinuations: 4,
-        think: true,
-        onThinking: (chunk) => {
-          if (thinkStartedAt === null) {
-            thinkStartedAt = Date.now();
-            context.onEvent?.({ type: 'agent.thinking.started', agent });
+        generationOptions: { num_predict: 512 },
+        maxContinuations: 1,
+        think: false,
+        onToken: (chunk) => {
+          if (streamStartedAt === null) {
+            streamStartedAt = Date.now();
+            context.onEvent?.({ type: 'agent.stream.started', agent });
           }
 
-          thinkChars += String(chunk ?? '').length;
-          context.onEvent?.({ type: 'agent.thinking', agent, chunk });
+          streamChars += String(chunk ?? '').length;
+          context.onEvent?.({ type: 'agent.stream', agent, chunk });
         },
       }
-      // Implementation-style agents without a tool loop still write code: use the coding model.
       : { role: 'coding', think: false });
 
-    if (thinkStartedAt !== null) {
+    if (streamStartedAt !== null) {
       context.onEvent?.({
-        type: 'agent.thinking.completed',
+        type: 'agent.stream.completed',
         agent,
-        chars: thinkChars,
-        elapsedMs: Date.now() - thinkStartedAt,
+        chars: streamChars,
+        elapsedMs: Date.now() - streamStartedAt,
       });
     }
 

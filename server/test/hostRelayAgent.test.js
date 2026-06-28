@@ -34,6 +34,7 @@ test('createHostRelayAgent dispatches a relay call and logs it', async () => {
     signalingServerUrl: 'http://localhost:4000',
     getAccessToken: async () => 'token',
     ollamaService: {
+      config: { model: 'qwen3:8b', models: { main: 'qwen3:8b', coding: 'qwen2.5-coder:7b', fast: 'qwen3:4b' } },
       async generateReply(_messages, { onToken }) {
         onToken('hi');
         return 'hi';
@@ -67,6 +68,10 @@ test('createHostRelayAgent dispatches a relay call and logs it', async () => {
   const prompt = logs.find((entry) => entry.title === 'Prompt received');
   assert.match(prompt.detail, /macbook/);
   assert.match(prompt.detail, /explain hashmaps/);
+
+  // The streaming log names the model in use (no role → auto-routed by prompt length).
+  const streaming = logs.find((entry) => entry.title === 'Streaming response');
+  assert.match(streaming.detail, /answering using .+ model/);
 
   agent.stop();
 });

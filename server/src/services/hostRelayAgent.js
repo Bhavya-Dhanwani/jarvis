@@ -108,6 +108,7 @@ export function createHostRelayAgent({
     }
 
     const device = String(frame.args?.device ?? 'a client');
+    const model = resolveModelLabel(ollamaService, frame.args?.role, frame.args?.messages);
 
     if (frame.method === 'generateReply' || frame.method === 'generateToolTurn') {
       const roleTag = frame.args?.role ? ` [${frame.args.role}]` : '';
@@ -120,11 +121,12 @@ export function createHostRelayAgent({
     const loggingSend = (value) => {
       if (!streamingLogged && (value.type === 'token' || value.type === 'thinking')) {
         streamingLogged = true;
-        output('info', 'Streaming response', `${device} → ${value.type === 'thinking' ? 'reasoning…' : 'answering…'}`);
+        const verb = value.type === 'thinking' ? 'reasoning' : 'answering';
+        output('info', 'Streaming response', `${device} → ${verb} using ${model} model`);
       }
 
       if (value.type === 'result') {
-        output('success', 'Response sent', device);
+        output('success', 'Response sent', `${device} (${model})`);
       }
 
       send(value);
@@ -232,6 +234,25 @@ export function createHostRelayAgent({
   }
 
   return { start, stop };
+}
+
+// Resolve which model the host will run for this call, for the operator log. An explicit
+// role maps to that role's model; chat (no role) auto-routes short prompts to the fast
+// model and longer ones to main, mirroring OllamaService's own routing.
+function resolveModelLabel(ollamaService, role, messages) {
+  const models = ollamaService?.config?.models ?? {};
+  const fallback = ollamaService?.config?.model ?? 'model';
+
+  if (role) {
+    return models[role] ?? fallback;
+  }
+
+  const latest = Array.isArray(messages)
+    ? [...messages].reverse().find((message) => message?.role === 'user')?.content ?? ''
+    : '';
+  const words = String(latest).trim().split(/\s+/).filter(Boolean).length;
+  const autoRole = words >= 8 ? 'main' : 'fast';
+  return models[autoRole] ?? models.main ?? fallback;
 }
 
 function latestPrompt(messages) {
